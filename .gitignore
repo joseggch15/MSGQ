@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+_tmp_*
+*.tmp
+# Replica local y configuracion sensible (token)
+*.sqlite3
+*.sqlite3-journal
+config.local.*
+.env
+# Settings locales del agente (pueden contener comandos con el token)
+.claude/
+# Credenciales embebidas (rama turnkey): NUNCA versionar el token real
+msgq/embedded_config.py
