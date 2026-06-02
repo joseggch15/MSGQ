@@ -103,31 +103,37 @@ class Poller(QThread):
         return stats
 
     async def _sync_changes(self, source) -> int:
-        """Trae el log de auditoria de equipos/RFID (semi-maestro). Primer run:
-        historico completo; luego incremental por watermark sobre `changed_at`."""
+        """Trae el log de auditoria de equipos/RFID (semi-maestro) de forma
+        PROGRESIVA: hace upsert por pagina y reporta avance, asi los datos
+        aparecen poco a poco en vez de todos al final. Primer run = historico
+        completo; luego incremental por watermark sobre `changed_at`."""
         watermark = self._db.get_watermark("change_events")
-        if watermark is None:
-            self.status.emit("Sincronizando historial de cambios (primer arranque, "
-                             "puede tardar unos minutos)…")
         if watermark:
             changes_from = watermark - _WATERMARK_EPSILON
         else:
             changes_from = datetime.fromisoformat(
                 config.CHANGES_HISTORY_START.replace("Z", ""))
 
-        total = 0
-        max_ts: datetime | None = None
-        for record_type in config.CHANGE_RECORD_TYPES:
-            nodes = await source.fetch_changes(record_type, changes_from)
+        state: dict = {"rows": 0, "max_ts": None}
+
+        def on_page(nodes: list[dict]) -> None:
             df = transform.change_events_to_df(nodes)
-            total += self._db.upsert("change_events", df)
+            self._db.upsert("change_events", df)
+            state["rows"] += len(df)
             ts = self._max_ts(df, "changed_at")
             if ts is not None:
-                max_ts = ts if max_ts is None else max(max_ts, ts)
-        if max_ts is not None:
+                state["max_ts"] = ts if state["max_ts"] is None else max(state["max_ts"], ts)
+            if watermark is None:   # solo en el primer arranque (carga larga)
+                self.status.emit(
+                    f"Sincronizando historial de cambios… {state['rows']:,} eventos")
+
+        for record_type in config.CHANGE_RECORD_TYPES:
+            await source.fetch_changes_paged(record_type, changes_from, on_page)
+
+        if state["max_ts"] is not None:
             self._db.set_watermark(
-                "change_events", max(max_ts, watermark) if watermark else max_ts)
-        return total
+                "change_events", max(state["max_ts"], watermark) if watermark else state["max_ts"])
+        return state["rows"]
 
     async def _sync_movements(self, source) -> int:
         """Trae movimientos creados/modificados desde el watermark (o desde la

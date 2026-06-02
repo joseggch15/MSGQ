@@ -98,6 +98,12 @@ class SimulatorSource:
             out.append(e)
         return out
 
+    async def fetch_changes_paged(self, record_type: str,
+                                  changes_from: datetime | None, on_page) -> None:
+        nodes = await self.fetch_changes(record_type, changes_from)
+        for i in range(0, len(nodes), 200):   # emula paginacion para el progreso
+            on_page(nodes[i:i + 200])
+
     async def aclose(self) -> None:
         return None
 

@@ -15,6 +15,7 @@ Lee de la réplica SQLite (sin tocar el poller) y ofrece:
 from __future__ import annotations
 
 import traceback
+from datetime import datetime
 
 import pandas as pd
 from PySide6.QtCore import Qt, QTimer
@@ -72,6 +73,8 @@ class EquipmentWindow(QMainWindow):
         self._eq_all = pd.DataFrame()
         self._changes = pd.DataFrame()
         self._trans = pd.DataFrame()
+        self._rfid_sum = ea.rfid_change_summary(pd.DataFrame())
+        self._last_counts = None
         self.setWindowTitle("MSGQ — Análisis de Equipos  ·  Newmont Merian")
         self.resize(1420, 880)
 
@@ -87,7 +90,7 @@ class EquipmentWindow(QMainWindow):
         # Auto-refresco: recoge los datos a medida que el poller los sincroniza.
         self._timer = QTimer(self)
         self._timer.setInterval(10000)
-        self._timer.timeout.connect(self._refresh)
+        self._timer.timeout.connect(self._maybe_refresh)
         self._timer.start()
 
     def closeEvent(self, event):  # noqa: N802 - override Qt
@@ -99,20 +102,21 @@ class EquipmentWindow(QMainWindow):
     def _build_controls(self) -> QGroupBox:
         box = QGroupBox("Filtros")
         row = QHBoxLayout(box)
+        # Los filtros usan _apply_filters (rapido); no recalculan la analitica temporal.
         self.cmb_status = QComboBox(); self.cmb_status.addItems(_STATUS_OPTIONS)
-        self.cmb_status.currentIndexChanged.connect(self._refresh)
+        self.cmb_status.currentIndexChanged.connect(self._apply_filters)
         self.cmb_type = QComboBox(); self.cmb_type.addItems(_TYPE_OPTIONS)
-        self.cmb_type.currentIndexChanged.connect(self._refresh)
+        self.cmb_type.currentIndexChanged.connect(self._apply_filters)
         eq = self._db.get_equipment()
         self.cmb_category = QComboBox(); self.cmb_category.addItem("Todas")
         self.cmb_category.addItems(_distinct(eq, "category"))
-        self.cmb_category.currentIndexChanged.connect(self._refresh)
+        self.cmb_category.currentIndexChanged.connect(self._apply_filters)
         self.cmb_group = QComboBox(); self.cmb_group.addItem("Todos")
         self.cmb_group.addItems(_distinct(eq, "group"))
-        self.cmb_group.currentIndexChanged.connect(self._refresh)
+        self.cmb_group.currentIndexChanged.connect(self._apply_filters)
         self.txt_search = QLineEdit()
         self.txt_search.setPlaceholderText("Buscar por ID, descripción, marca, modelo...")
-        self.txt_search.textChanged.connect(self._refresh)
+        self.txt_search.textChanged.connect(self._apply_filters)
         btn_refresh = QPushButton("Actualizar"); btn_refresh.clicked.connect(self._refresh)
         btn_export = QPushButton("Exportar a Excel…"); btn_export.clicked.connect(self._on_export)
 
@@ -255,28 +259,27 @@ class EquipmentWindow(QMainWindow):
     # --- Refresco -----------------------------------------------------------
 
     def _refresh(self):
+        """Refresco COMPLETO: relee la replica, recalcula la analitica temporal
+        (cara) y la cachea, dibuja graficas y aplica los filtros del snapshot."""
         try:
             self._eq_all = self._db.get_equipment()
             self._changes = self._db.get_change_events()
-            eq = self._filtered(self._eq_all)
+            self._last_counts = (len(self._eq_all), len(self._changes))
             ch, eq_all = self._changes, self._eq_all
 
-            self.m_inv.set_dataframe(eq[[c for c in _INVENTORY_COLS if c in eq.columns]] if not eq.empty else eq)
-            self.m_cat.set_dataframe(ea.group_summary(eq, "category", "Categoría"))
-            self.m_grp.set_dataframe(ea.group_summary(eq, "group", "Grupo"))
-            self.m_dep.set_dataframe(ea.group_summary(eq, "department", "Departamento"))
-            self.m_mk.set_dataframe(ea.group_summary(eq, "make", "Marca"))
+            # Analitica temporal (cara): se cachea para que filtrar no la repita.
+            self._rfid_sum = ea.rfid_change_summary(ch)
+            self._trans = ea.status_transitions(ch, eq_all)
+            trans = self._trans
 
+            rs = self._rfid_sum
             self.m_rfid_time.set_dataframe(ea.rfid_changes_over_time(ch))
             self.m_rfid_churn.set_dataframe(ea.rfid_churn_by_tag(ch))
-            rs = ea.rfid_change_summary(ch)
             self.lbl_rfid.setText(
                 f"Eventos RFID: {rs['Eventos RFID']:,}   ·   Asignados: {rs['Asignados']:,}"
                 f"   ·   Cambiados: {rs['Cambiados']:,}   ·   Removidos: {rs['Removidos']:,}"
                 f"   ·   Tags: {rs['Tags (registros)']:,}")
 
-            trans = ea.status_transitions(ch, eq_all)
-            self._trans = trans
             self.m_trans.set_dataframe(trans)
             self.m_trans_sum.set_dataframe(ea.status_transition_summary(trans))
             self.m_top_oi.set_dataframe(ea.top_equipment_by_transition(trans, OUT, IN))
@@ -295,10 +298,49 @@ class EquipmentWindow(QMainWindow):
             self.m_comp.set_dataframe(ea.data_completeness(eq_all))
 
             self._update_charts(eq_all, ch, trans)
-            self._set_kpis(ea.fleet_kpis(eq), rs, trans)
+            self._apply_filters()      # snapshot (inventario + agrupaciones + KPIs)
+            self._update_status()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Error al analizar",
                                  f"{exc}\n\n{traceback.format_exc()}")
+
+    def _apply_filters(self):
+        """Solo lo que depende de los filtros (rapido): inventario, agrupaciones
+        y KPIs. Reutiliza la analitica temporal cacheada -> filtrar es instantaneo."""
+        try:
+            eq = self._filtered(self._eq_all)
+            self.m_inv.set_dataframe(
+                eq[[c for c in _INVENTORY_COLS if c in eq.columns]] if not eq.empty else eq)
+            self.m_cat.set_dataframe(ea.group_summary(eq, "category", "Categoría"))
+            self.m_grp.set_dataframe(ea.group_summary(eq, "group", "Grupo"))
+            self.m_dep.set_dataframe(ea.group_summary(eq, "department", "Departamento"))
+            self.m_mk.set_dataframe(ea.group_summary(eq, "make", "Marca"))
+            self._set_kpis(ea.fleet_kpis(eq), self._rfid_sum, self._trans)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Error al filtrar",
+                                 f"{exc}\n\n{traceback.format_exc()}")
+
+    def _maybe_refresh(self):
+        """Auto-refresco solo si la replica cambio (mantiene la UI fluida)."""
+        try:
+            counts = (self._db.row_count("equipment"), self._db.row_count("change_events"))
+        except Exception:  # noqa: BLE001
+            return
+        if counts != self._last_counts:
+            self._refresh()
+
+    def _update_status(self):
+        """Barra de estado con indicador de carga del historial."""
+        n_eq, n_ch = len(self._eq_all), len(self._changes)
+        loading = self._db.get_watermark("change_events") is None
+        if loading:
+            self.statusBar().showMessage(
+                f"Cargando historial de cambios...  {n_ch:,} eventos · {n_eq:,} equipos "
+                "(las pestañas de RFID/transiciones se completan al terminar)")
+        else:
+            self.statusBar().showMessage(
+                f"{n_eq:,} equipos · {n_ch:,} eventos de cambio · "
+                f"actualizado {datetime.now():%H:%M:%S}")
 
     def _update_charts(self, eq_all, ch, trans):
         sb = ea.status_breakdown(eq_all)

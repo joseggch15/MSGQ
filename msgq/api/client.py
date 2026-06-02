@@ -205,13 +205,33 @@ class AdaptIQClient:
 
     async def fetch_changes(self, record_type: str,
                             changes_from: datetime | None) -> list[dict]:
+        out: list[dict] = []
+        await self.fetch_changes_paged(record_type, changes_from, out.extend)
+        return out
+
+    async def fetch_changes_paged(self, record_type: str,
+                                  changes_from: datetime | None, on_page) -> None:
+        """Pagina `changes` llamando `on_page(nodes)` por pagina (ingesta progresiva)."""
         site_id = await self._resolve_site_id()
         query_filter: dict[str, Any] = {"siteId": site_id, "recordType": record_type}
         if changes_from is not None:
             query_filter["changesFrom"] = _iso(changes_from)
-        return await self._paginate_root_connection(
-            queries.CHANGES_QUERY, "changes",
-            {"filter": query_filter, "first": self._settings.page_size})
+        cursor: str | None = None
+        for _ in range(100_000):
+            page_vars: dict[str, Any] = {"filter": query_filter, "first": self._settings.page_size}
+            if cursor:
+                page_vars["after"] = cursor
+            data = await self._execute(queries.CHANGES_QUERY, page_vars)
+            conn = data.get("changes") or {}
+            nodes = [e["node"] for e in conn.get("edges", []) if e.get("node")]
+            if nodes:
+                on_page(nodes)
+            page_info = conn.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            if not cursor:
+                break
 
     async def _discover_equipment_field(self) -> str:
         """Introspecciona el tipo Site para hallar la conexion de equipos.

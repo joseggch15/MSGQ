@@ -343,8 +343,8 @@ class MainWindow(QMainWindow):
     # =======================================================================
 
     def _on_cycle(self, _stats: dict):
-        # Refresco inmediato al cerrar un ciclo de sincronizacion.
-        self._refresh_views()
+        # Refresco inmediato y completo al cerrar un ciclo de sincronizacion.
+        self._refresh_views(force=True)
 
     def _on_failed(self, message: str):
         self.statusBar().showMessage(f"⚠ Error de sincronizacion: {message}")
@@ -353,7 +353,18 @@ class MainWindow(QMainWindow):
     # Refresco de vistas (lee de la replica SQLite)
     # =======================================================================
 
-    def _refresh_views(self):
+    def _refresh_views(self, force: bool = False):
+        # Evita recalcular si la replica no cambio (el QTimer dispara seguido,
+        # pero los datos solo cambian por poll): mantiene la UI fluida.
+        try:
+            counts = (self._db.row_count("movements"),
+                      self._db.row_count("equipment"),
+                      self._db.row_count("adaptmac"))
+        except Exception:  # noqa: BLE001
+            counts = None
+        if not force and counts is not None and counts == getattr(self, "_last_counts", None):
+            return
+        self._last_counts = counts
         try:
             mv = self._db.get_movements(limit=1000)
             eq = self._db.get_equipment()

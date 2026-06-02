@@ -561,6 +561,21 @@ def test_e2e_export_sheets():
         shutil.rmtree(work, ignore_errors=True)
 
 
+# ===========================================================================
+# 17. Paginacion progresiva de cambios (on_page)
+# ===========================================================================
+
+def test_e2e_fetch_changes_paged():
+    src = make_source(_settings(":memory:"))
+    collected: list = []
+    _run(src.fetch_changes_paged("EquipmentRfid", None, collected.extend))
+    direct = _run(src.fetch_changes("EquipmentRfid", None))
+    _run(src.aclose())
+    assert len(collected) > 0
+    assert len(collected) == len(direct)   # mismas filas que la version completa
+    print("OK  test_e2e_fetch_changes_paged")
+
+
 if __name__ == "__main__":
     tests = [
         test_e2e_simulator_pipeline_shapes,
@@ -579,6 +594,7 @@ if __name__ == "__main__":
         test_e2e_cost_centre_changes,
         test_e2e_equipment_audit_log,
         test_e2e_export_sheets,
+        test_e2e_fetch_changes_paged,
     ]
     failed = 0
     for t in tests:

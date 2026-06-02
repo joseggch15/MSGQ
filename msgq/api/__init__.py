@@ -40,6 +40,12 @@ class DataSource(Protocol):
         """Eventos del log de auditoria de `record_type` desde `changes_from`."""
         ...
 
+    async def fetch_changes_paged(self, record_type: str,
+                                  changes_from: datetime | None, on_page) -> None:
+        """Igual que `fetch_changes` pero llama `on_page(nodes)` por cada pagina
+        (permite ingesta progresiva y reportar avance)."""
+        ...
+
     async def aclose(self) -> None:
         """Libera recursos (conexiones HTTP)."""
         ...
