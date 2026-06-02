@@ -15,7 +15,7 @@ import os
 import shutil
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from msgq import config
 from msgq.api import make_source
 from msgq.core import alerts as al
+from msgq.core import equipment_analytics as ea
 from msgq.core import transform
 from msgq.storage import Database
 
@@ -341,6 +342,124 @@ def test_e2e_equipment_csv_import():
         shutil.rmtree(work, ignore_errors=True)
 
 
+# ===========================================================================
+# 9. Log de auditoria: transform, storage e idempotencia
+# ===========================================================================
+
+def _chg_node(rtype, rid, event, attr, before, after, when=None, who="u@x"):
+    return {
+        "changedAt": (when or datetime.now()).isoformat(),
+        "recordType": rtype, "recordId": rid, "event": event, "whodunnit": who,
+        "changes": [{"attribute": attr, "before": before, "after": after}],
+    }
+
+
+def test_e2e_change_events_transform_and_storage():
+    work = tempfile.mkdtemp(prefix="msgq_e2e_")
+    try:
+        nodes = [
+            _chg_node("EquipmentItem", "5", "update", "equipment_status_id", "1", "2", datetime(2026, 1, 1)),
+            _chg_node("EquipmentRfid", "10", "create", "rfid", None, "AAA", datetime(2026, 1, 2)),
+            _chg_node("EquipmentRfid", "10", "update", "rfid", "AAA", "BBB", datetime(2026, 1, 3)),
+        ]
+        df = transform.change_events_to_df(nodes)
+        assert list(df.columns) == config.CHANGE_EVENT_COLS
+        assert len(df) == 3
+        assert df["event_key"].is_unique
+        assert pd.api.types.is_datetime64_any_dtype(df["changed_at"])
+
+        db = Database(os.path.join(work, "r.sqlite3"))
+        db.upsert("change_events", df)
+        db.upsert("change_events", df)   # idempotente por event_key
+        assert db.row_count("change_events") == 3
+        db.set_watermark("change_events", df["changed_at"].max().to_pydatetime())
+        assert db.get_watermark("change_events") is not None
+        db.close()
+        print("OK  test_e2e_change_events_transform_and_storage")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+# ===========================================================================
+# 10. Frecuencia de cambio de RFID
+# ===========================================================================
+
+def test_e2e_rfid_change_frequency():
+    base = datetime(2026, 1, 15)
+    nodes = [
+        _chg_node("EquipmentRfid", "1", "create", "rfid", None, "T1", base),
+        _chg_node("EquipmentRfid", "1", "update", "rfid", "T1", "T2", base + timedelta(days=40)),
+        _chg_node("EquipmentRfid", "2", "create", "rfid", None, "T3", base + timedelta(days=5)),
+        _chg_node("EquipmentRfid", "3", "destroy", "rfid", "T4", None, base + timedelta(days=70)),
+        # ruido que NO es RFID:
+        _chg_node("EquipmentItem", "9", "update", "equipment_status_id", "1", "2", base),
+    ]
+    changes = transform.change_events_to_df(nodes)
+    summary = ea.rfid_change_summary(changes)
+    assert summary["Eventos RFID"] == 4
+    assert summary["Asignados"] == 2 and summary["Cambiados"] == 1 and summary["Removidos"] == 1
+    over_time = ea.rfid_changes_over_time(changes)
+    assert not over_time.empty and over_time["Total"].sum() == 4
+    churn = ea.rfid_churn_by_tag(changes)
+    assert int(churn.loc[churn["record_id"] == "1", "Eventos"].iloc[0]) == 2
+    print("OK  test_e2e_rfid_change_frequency")
+
+
+# ===========================================================================
+# 11. Transiciones de estado In->Out + tiempo en servicio
+# ===========================================================================
+
+def test_e2e_status_transitions():
+    base = datetime(2026, 1, 1)
+    nodes = [
+        _chg_node("EquipmentItem", "5", "create", "equipment_status_id", None, "1", base),
+        _chg_node("EquipmentItem", "5", "update", "equipment_status_id", "1", "2", base + timedelta(days=30)),
+        _chg_node("EquipmentItem", "5", "update", "equipment_status_id", "2", "1", base + timedelta(days=40)),
+        _chg_node("EquipmentItem", "5", "update", "equipment_status_id", "1", "2", base + timedelta(days=70)),
+    ]
+    changes = transform.change_events_to_df(nodes)
+    eq = transform.equipment_to_df([
+        {"id": "5", "equipmentId": "HTK0805", "description": "Dump 805", "status": "Out of Service"},
+    ])
+    trans = ea.status_transitions(changes, eq)
+    # 3 transiciones reales (descarta el create None->1).
+    assert len(trans) == 3
+    assert trans["equipment_id"].iloc[0] == "HTK0805"   # enlazado por internal_id
+    summary = ea.status_transition_summary(trans)
+    in_out = summary.loc[summary["Transicion"] == "In Service -> Out of Service", "Veces"]
+    assert int(in_out.iloc[0]) == 2
+
+    io = ea.in_to_out_over_time(trans)
+    assert io["In->Out"].sum() == 2
+    tis = ea.time_in_service(trans)
+    assert int(tis["Salidas a Out"].iloc[0]) == 2
+    # Tiempo en servicio: (dia30-dia0)=30 y (dia70-dia40)=30 -> promedio 30.
+    assert abs(float(tis["Dias prom. en servicio"].iloc[0]) - 30.0) < 0.1
+    print("OK  test_e2e_status_transitions")
+
+
+# ===========================================================================
+# 12. Cambios via simulador -> analitica no vacia
+# ===========================================================================
+
+def test_e2e_changes_via_simulator():
+    src = make_source(_settings(":memory:"))
+    eq = transform.equipment_to_df(_run(src.fetch_equipment(None)))
+    rfid_nodes = _run(src.fetch_changes("EquipmentRfid", None))
+    eqp_nodes = _run(src.fetch_changes("EquipmentItem", None))
+    _run(src.aclose())
+    changes = pd.concat([transform.change_events_to_df(rfid_nodes),
+                         transform.change_events_to_df(eqp_nodes)], ignore_index=True)
+    assert not changes.empty
+    assert ea.rfid_change_summary(changes)["Eventos RFID"] >= 1
+    trans = ea.status_transitions(changes, eq)
+    assert not trans.empty
+    assert not ea.audit_by_user(changes).empty
+    # internal_id presente en el inventario (para enlazar transiciones).
+    assert eq["internal_id"].notna().any()
+    print("OK  test_e2e_changes_via_simulator")
+
+
 if __name__ == "__main__":
     tests = [
         test_e2e_simulator_pipeline_shapes,
@@ -351,6 +470,10 @@ if __name__ == "__main__":
         test_e2e_adaptmac_alerts,
         test_e2e_full_cycle_like_poller,
         test_e2e_equipment_csv_import,
+        test_e2e_change_events_transform_and_storage,
+        test_e2e_rfid_change_frequency,
+        test_e2e_status_transitions,
+        test_e2e_changes_via_simulator,
     ]
     failed = 0
     for t in tests:

@@ -164,8 +164,28 @@ class MainWindow(QMainWindow):
         hint.setStyleSheet("color:#5A6B7B;")
         r3.addWidget(hint)
         r3.addStretch(1)
+        self.btn_analyze = QPushButton("Analizar equipos…")
+        self.btn_analyze.setObjectName("accent")
+        self.btn_analyze.setToolTip(
+            "Abre el análisis de flota: filtros, frecuencia de cambio de RFID, "
+            "transiciones In↔Out, auditoría y gráficas.")
+        self.btn_analyze.clicked.connect(self._on_open_equipment)
+        r3.addWidget(self.btn_analyze)
         col.addLayout(r3)
         return box
+
+    def _on_open_equipment(self):
+        # Import perezoso: pyqtgraph solo se carga al abrir el análisis.
+        try:
+            from msgq.ui.equipment_window import EquipmentWindow
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self, "Falta pyqtgraph",
+                f"No se pudo abrir el análisis de equipos:\n{exc}\n\n"
+                "Instala la dependencia: pip install pyqtgraph")
+            return
+        self._eq_window = EquipmentWindow(self._db, self)
+        self._eq_window.show()
 
     def _build_kpi_strip(self) -> QFrame:
         frame = QFrame()

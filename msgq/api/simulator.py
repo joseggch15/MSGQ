@@ -55,6 +55,7 @@ class SimulatorSource:
         roster_rng = random.Random(42)       # flota: estable entre arranques
         self._fleet = self._build_fleet(roster_rng)   # dicts internos ricos
         self._adaptmacs = self._build_adaptmacs(roster_rng)
+        self._change_log = self._build_change_log(roster_rng)
         self._seq = 0
         self._equipment_sent = False
 
@@ -79,6 +80,23 @@ class SimulatorSource:
                 mac["online"] = self._rng.random() > 0.2
                 mac["keyBypass"] = self._rng.random() < 0.1
         return list(self._adaptmacs)
+
+    async def fetch_changes(self, record_type: str,
+                            changes_from: datetime | None) -> list[dict]:
+        """Eventos sinteticos del log de auditoria del tipo pedido."""
+        if self._rng.random() < 0.5:
+            self._append_live_change()
+        floor = self._naive(changes_from) if changes_from is not None else None
+        out = []
+        for e in self._change_log:
+            if e["recordType"] != record_type:
+                continue
+            if floor is not None:
+                ts = self._parse(e["changedAt"])
+                if ts is not None and ts < floor:
+                    continue
+            out.append(e)
+        return out
 
     async def aclose(self) -> None:
         return None
@@ -115,6 +133,8 @@ class SimulatorSource:
                 "department": "Maintenance", "smu": rng.randint(2000, 9000),
                 "interval_type": "hrs",
             })
+        for idx, item in enumerate(fleet, start=1):
+            item["internal_id"] = str(idx)   # id numerico interno (== recordId)
         return fleet
 
     def _equipment_node(self, e: dict) -> dict:
@@ -122,6 +142,7 @@ class SimulatorSource:
         rng = self._rng
         light = e["is_light_vehicle"]
         return {
+            "id": e["internal_id"],
             "equipmentId": e["equipment_id"],
             "fieldId": e["field_id"],
             "description": e["description"],
@@ -165,6 +186,73 @@ class SimulatorSource:
                 "keyBypass": False, "online": online,
             })
         return macs
+
+    # -- log de auditoria sintetico ----------------------------------------
+
+    _EMAILS = ["m.venegas@plgims.com", "ryan.fredeluces@veridapt.com",
+               "j.gomez@plgims.com"]
+
+    def _chg(self, when, rtype, rid, event, who, attr, before, after) -> dict:
+        return {
+            "changedAt": when.isoformat(), "recordType": rtype, "recordId": rid,
+            "event": event, "whodunnit": who,
+            "changes": [{"attribute": attr, "before": before, "after": after}],
+        }
+
+    def _build_change_log(self, rng: random.Random) -> list[dict]:
+        now = datetime.now()
+        log: list[dict] = []
+        # Transiciones de estado (1=In, 2=Out, 3=Decom) en ~15 equipos.
+        for e in rng.sample(self._fleet, min(15, len(self._fleet))):
+            cur = "1"
+            for _ in range(rng.randint(1, 3)):
+                when = now - timedelta(days=rng.randint(5, 175), hours=rng.randint(0, 23))
+                nxt = rng.choice([s for s in ("1", "2", "3") if s != cur])
+                log.append(self._chg(when, "EquipmentItem", e["internal_id"],
+                                     "update", rng.choice(self._EMAILS),
+                                     "equipment_status_id", cur, nxt))
+                cur = nxt
+        # RFID: alta de tag + cambios posteriores en algunos.
+        for i in range(1, 26):
+            when = now - timedelta(days=rng.randint(10, 179))
+            tag = f"56B{rng.randint(0x10000, 0xFFFFF):05X}"
+            log.append(self._chg(when, "EquipmentRfid", str(i), "create",
+                                 rng.choice(self._EMAILS), "rfid", None, tag))
+            if rng.random() < 0.35:
+                when2 = when + timedelta(days=rng.randint(5, 60))
+                if when2 < now:
+                    log.append(self._chg(when2, "EquipmentRfid", str(i), "update",
+                                         rng.choice(self._EMAILS), "rfid", tag,
+                                         f"56B{rng.randint(0x10000, 0xFFFFF):05X}"))
+        log.sort(key=lambda x: x["changedAt"])
+        return log
+
+    def _append_live_change(self) -> None:
+        rng = self._rng
+        now = datetime.now()
+        if rng.random() < 0.5 and self._fleet:
+            e = rng.choice(self._fleet)
+            before, after = rng.choice([("1", "2"), ("2", "1"), ("1", "3")])
+            self._change_log.append(self._chg(
+                now, "EquipmentItem", e["internal_id"], "update",
+                rng.choice(self._EMAILS), "equipment_status_id", before, after))
+        else:
+            self._change_log.append(self._chg(
+                now, "EquipmentRfid", str(rng.randint(1, 25)), "update",
+                rng.choice(self._EMAILS), "rfid",
+                f"56B{rng.randint(0x10000, 0xFFFFF):05X}",
+                f"56B{rng.randint(0x10000, 0xFFFFF):05X}"))
+
+    @staticmethod
+    def _parse(iso: str):
+        try:
+            return datetime.fromisoformat(iso).replace(tzinfo=None)
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _naive(dt: datetime) -> datetime:
+        return dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) else dt
 
     def _make_movement(self) -> dict:
         rng = self._rng

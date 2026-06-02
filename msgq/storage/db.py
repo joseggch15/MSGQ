@@ -33,17 +33,20 @@ _NUMERIC = {
     },
     "equipment": {"service_interval", "smu_value"},
     "adaptmac": set(),
+    "change_events": set(),
 }
 _DATETIME = {
     "movements": {"record_collected_at", "created_at", "updated_at"},
     "equipment": {"smu_value_date", "updated_at"},
     "adaptmac": {"last_successful_comms", "last_failed_comms", "updated_at"},
+    "change_events": {"changed_at"},
 }
 _BOOL = {
     "movements": {"is_service_truck"},
     "equipment": {"is_light_vehicle", "is_pod", "is_service_truck",
                   "is_contractor_vehicle", "dispense_limited"},
     "adaptmac": {"online", "key_bypass"},
+    "change_events": set(),
 }
 
 # Metadatos por entidad: (tabla, columnas, clave primaria).
@@ -51,6 +54,13 @@ _ENTITIES = {
     "movements": (config.MOVEMENT_COLS, "id"),
     "equipment": (config.EQUIPMENT_COLS, "equipment_id"),
     "adaptmac":  (config.ADAPTMAC_COLS, "code"),
+    "change_events": (config.CHANGE_EVENT_COLS, "event_key"),
+}
+
+# Columna temporal de cada entidad (para indice y watermark).
+_TS_COL = {
+    "movements": "updated_at", "equipment": "updated_at",
+    "adaptmac": "updated_at", "change_events": "changed_at",
 }
 
 
@@ -83,10 +93,25 @@ class Database:
                 self._conn.execute(
                     f'CREATE TABLE IF NOT EXISTS {entity} ({", ".join(defs)})'
                 )
-                self._conn.execute(
-                    f'CREATE INDEX IF NOT EXISTS idx_{entity}_updated '
-                    f'ON {entity} ("updated_at")'
-                )
+                # Migracion suave: agrega columnas canonicas que falten en una
+                # tabla preexistente (permite evolucionar el esquema sin borrar
+                # la replica).
+                existing = {
+                    row["name"]
+                    for row in self._conn.execute(f'PRAGMA table_info("{entity}")')
+                }
+                for c in cols:
+                    if c not in existing:
+                        self._conn.execute(
+                            f'ALTER TABLE {entity} ADD COLUMN "{c}" '
+                            f'{self._sql_type(entity, c)}'
+                        )
+                ts_col = _TS_COL.get(entity)
+                if ts_col and ts_col in cols:
+                    self._conn.execute(
+                        f'CREATE INDEX IF NOT EXISTS idx_{entity}_ts '
+                        f'ON {entity} ("{ts_col}")'
+                    )
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS sync_state ("
                 "entity TEXT PRIMARY KEY, watermark TEXT, last_run TEXT)"
@@ -174,6 +199,12 @@ class Database:
 
     def get_adaptmac(self) -> pd.DataFrame:
         return self.read("adaptmac", order_by='"code"')
+
+    def get_change_events(self, record_type: str | None = None) -> pd.DataFrame:
+        if record_type:
+            return self.read("change_events", where='"record_type" = ?',
+                             params=(record_type,), order_by='"changed_at" DESC')
+        return self.read("change_events", order_by='"changed_at" DESC')
 
     def row_count(self, entity: str) -> int:
         with self._lock:

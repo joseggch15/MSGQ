@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 from PySide6.QtCore import QThread, Signal
 
+from msgq import config
 from msgq.api import make_source
 from msgq.config import Settings
 from msgq.core import transform
@@ -98,7 +99,32 @@ class Poller(QThread):
                 source, "equipment", "fetch_equipment", transform.equipment_to_df)
             stats["adaptmac"] = await self._sync_master(
                 source, "adaptmac", "fetch_adaptmacs", transform.adaptmacs_to_df)
+            stats["changes"] = await self._sync_changes(source)
         return stats
+
+    async def _sync_changes(self, source) -> int:
+        """Trae el log de auditoria de equipos/RFID (semi-maestro). Primer run:
+        historico completo; luego incremental por watermark sobre `changed_at`."""
+        watermark = self._db.get_watermark("change_events")
+        if watermark:
+            changes_from = watermark - _WATERMARK_EPSILON
+        else:
+            changes_from = datetime.fromisoformat(
+                config.CHANGES_HISTORY_START.replace("Z", ""))
+
+        total = 0
+        max_ts: datetime | None = None
+        for record_type in config.CHANGE_RECORD_TYPES:
+            nodes = await source.fetch_changes(record_type, changes_from)
+            df = transform.change_events_to_df(nodes)
+            total += self._db.upsert("change_events", df)
+            ts = self._max_ts(df, "changed_at")
+            if ts is not None:
+                max_ts = ts if max_ts is None else max(max_ts, ts)
+        if max_ts is not None:
+            self._db.set_watermark(
+                "change_events", max(max_ts, watermark) if watermark else max_ts)
+        return total
 
     async def _sync_movements(self, source) -> int:
         """Trae movimientos creados/modificados desde el watermark (o desde la
@@ -131,10 +157,14 @@ class Poller(QThread):
     @staticmethod
     def _max_updated(df: pd.DataFrame) -> datetime | None:
         """Mayor `updated_at` del lote, como watermark del proximo ciclo."""
-        if df is None or df.empty or "updated_at" not in df.columns:
+        return Poller._max_ts(df, "updated_at")
+
+    @staticmethod
+    def _max_ts(df: pd.DataFrame, col: str) -> datetime | None:
+        """Mayor timestamp de la columna `col`, o None si no hay."""
+        if df is None or df.empty or col not in df.columns:
             return None
-        col = pd.to_datetime(df["updated_at"], errors="coerce")
-        mx = col.max()
+        mx = pd.to_datetime(df[col], errors="coerce").max()
         if pd.isna(mx):
             return None
         return mx.to_pydatetime()

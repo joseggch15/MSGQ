@@ -93,7 +93,7 @@ MOVEMENT_COLS = [
 
 # Un equipo (Equipment Item) — superset de lo que ya normaliza Inventory_Equipment.
 EQUIPMENT_COLS = [
-    "equipment_id", "field_id", "description", "registration_number",
+    "equipment_id", "internal_id", "field_id", "description", "registration_number",
     "group", "category", "status",
     "make", "model", "product",
     "is_light_vehicle", "is_pod", "is_service_truck", "is_contractor_vehicle",
@@ -110,6 +110,34 @@ ADAPTMAC_COLS = [
     "code", "description", "site", "online", "key_bypass",
     "last_successful_comms", "last_failed_comms", "updated_at",
 ]
+
+# Un evento del log de auditoria, aplanado a UNA fila por atributo cambiado
+# (Query.changes -> ChangeEvent -> ChangedAttribute). `event_key` es la PK
+# sintetica que hace idempotente el upsert.
+CHANGE_EVENT_COLS = [
+    "event_key", "changed_at", "record_type", "record_id",
+    "event", "whodunnit", "attribute", "before", "after",
+]
+
+# ---------------------------------------------------------------------------
+# Auditoria de equipos (validado contra el tenant de Merian)
+# ---------------------------------------------------------------------------
+# Tipos de registro que se sincronizan del log para el analisis de flota.
+CHANGE_RECORD_EQUIPMENT = "EquipmentItem"
+CHANGE_RECORD_RFID      = "EquipmentRfid"   # cambios de tag RFID (atributo 'rfid')
+CHANGE_RECORD_TYPES = (CHANGE_RECORD_EQUIPMENT, CHANGE_RECORD_RFID)
+
+# Atributos clave dentro del diff de cambios.
+ATTR_STATUS = "equipment_status_id"   # en EquipmentItem
+ATTR_RFID   = "rfid"                  # en EquipmentRfid
+
+# Mapa id->estado (enum INS/OUTS/DECOMM == 1/2/3, confirmado en vivo).
+EQUIPMENT_STATUS_BY_ID = {
+    "1": STATUS_IN, "2": STATUS_OUT, "3": STATUS_DECOM,
+}
+
+# Inicio del historico al sincronizar cambios por primera vez (sin watermark).
+CHANGES_HISTORY_START = "2022-01-01T00:00:00Z"
 
 # ===========================================================================
 # Configuracion de conexion

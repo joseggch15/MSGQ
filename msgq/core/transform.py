@@ -126,6 +126,7 @@ def flatten_equipment(node: dict) -> dict:
     """
     return {
         "equipment_id":         node.get("equipmentId"),
+        "internal_id":          node.get("id"),
         "field_id":             node.get("fieldId"),
         "description":          node.get("description"),
         "registration_number":  node.get("fieldDescription"),
@@ -204,7 +205,9 @@ def _build_df(rows: list[dict], columns: list[str],
         if col in df.columns:
             # La API devuelve ISO8601 con offset (+11:00); el simulador, naive.
             # Normalizamos a UTC y quitamos tz -> datetime naive consistente.
-            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True).dt.tz_localize(None)
+            df[col] = pd.to_datetime(
+                df[col], errors="coerce", utc=True, format="ISO8601"
+            ).dt.tz_localize(None)
     return df
 
 
@@ -221,3 +224,39 @@ def equipment_to_df(nodes: list[dict]) -> pd.DataFrame:
 def adaptmacs_to_df(nodes: list[dict]) -> pd.DataFrame:
     rows = [flatten_adaptmac(n) for n in nodes]
     return _build_df(rows, config.ADAPTMAC_COLS, None, _ADAPTMAC_DATETIME)
+
+
+# ===========================================================================
+# Log de auditoria: una fila por atributo cambiado
+# ===========================================================================
+
+_CHANGE_DATETIME = ["changed_at"]
+
+
+def change_events_to_df(nodes: list[dict]) -> pd.DataFrame:
+    """Aplana ChangeEvents a una fila por ChangedAttribute.
+
+    `event_key` (PK) = recordType:recordId:changedAt:attribute, para upsert
+    idempotente al re-descargar ventanas solapadas.
+    """
+    rows: list[dict] = []
+    for n in nodes:
+        changed_at = n.get("changedAt")
+        record_type = n.get("recordType")
+        record_id = n.get("recordId")
+        event = n.get("event")
+        whodunnit = n.get("whodunnit")
+        for ch in (n.get("changes") or []):
+            attr = ch.get("attribute")
+            rows.append({
+                "event_key": f"{record_type}:{record_id}:{changed_at}:{attr}",
+                "changed_at": changed_at,
+                "record_type": record_type,
+                "record_id": record_id,
+                "event": event,
+                "whodunnit": whodunnit,
+                "attribute": attr,
+                "before": ch.get("before"),
+                "after": ch.get("after"),
+            })
+    return _build_df(rows, config.CHANGE_EVENT_COLS, None, _CHANGE_DATETIME)

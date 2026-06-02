@@ -126,6 +126,33 @@ La configuración también se puede fijar por entorno (ver [`.env.example`](.env
 
 Los umbrales viven en `config.py` y son ajustables.
 
+## Análisis de equipos
+
+El botón **"Analizar equipos…"** abre una ventana dedicada (lee de la réplica
+SQLite; no toca el poller) con:
+
+- **Inventario filtrable** por estado (In Service / Out of Service /
+  Decommissioned), tipo (propios / contratistas), categoría, grupo y texto.
+- **KPIs de flota**: total, en servicio, fuera de servicio, disponibilidad %,
+  contratistas, eventos RFID, transiciones In→Out.
+- **Agrupaciones**: por categoría, grupo, departamento y marca (con disponibilidad).
+- **Cambios de RFID**: frecuencia (asignado / cambiado / removido) por mes y
+  "re-tagueo" por registro de tag.
+- **Transiciones de estado**: cada cambio In↔Out↔Decom con equipo, fecha y
+  **quién** (`whodunnit`); resumen por tipo; y **tiempo medio en servicio** antes
+  de salir a Out.
+- **Auditoría (quién)**: cambios por usuario.
+- **Gráficas** (pyqtgraph): equipos por estado, disponibilidad por categoría,
+  cambios de RFID por mes y transiciones In→Out por mes.
+
+**Fuente de datos:** el log de auditoría GraphQL (`Query.changes` →
+`ChangeEvent` con `changedAt` / `recordType` / `whodunnit` / diff `changes`).
+Las transiciones de estado salen de `EquipmentItem.equipment_status_id`
+(1=In Service, 2=Out of Service, 3=Decommissioned) enlazado al equipo por
+`internal_id`; los cambios de RFID, de `EquipmentRfid` (atributo `rfid`). El
+primer arranque sincroniza el histórico completo en segundo plano; luego es
+incremental por watermark sobre `changed_at`.
+
 ## Pruebas
 
 E2E con el pipeline real y la fuente simulada (sin mocks):

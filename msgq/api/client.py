@@ -127,6 +127,30 @@ class AdaptIQClient:
                 break
         return nodes
 
+    async def _paginate_root_connection(
+        self, query: str, root_key: str, variables: dict[str, Any],
+    ) -> list[dict]:
+        """Pagina una conexion top-level (p. ej. `changes`) por cursor."""
+        nodes: list[dict] = []
+        cursor: str | None = None
+        for _ in range(10_000):
+            page_vars = dict(variables)
+            if cursor:
+                page_vars["after"] = cursor
+            data = await self._execute(query, page_vars)
+            conn = data.get(root_key) or {}
+            for edge in conn.get("edges", []):
+                node = edge.get("node")
+                if node is not None:
+                    nodes.append(node)
+            page_info = conn.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            if not cursor:
+                break
+        return nodes
+
     # -- resolucion de sitio -----------------------------------------------
 
     async def _resolve_site_id(self) -> str:
@@ -178,6 +202,16 @@ class AdaptIQClient:
         return await self._paginate_site_connection(
             queries.ADAPTMACS_QUERY, "adaptMacs",
             {"siteId": site_id, "first": self._settings.page_size})
+
+    async def fetch_changes(self, record_type: str,
+                            changes_from: datetime | None) -> list[dict]:
+        site_id = await self._resolve_site_id()
+        query_filter: dict[str, Any] = {"siteId": site_id, "recordType": record_type}
+        if changes_from is not None:
+            query_filter["changesFrom"] = _iso(changes_from)
+        return await self._paginate_root_connection(
+            queries.CHANGES_QUERY, "changes",
+            {"filter": query_filter, "first": self._settings.page_size})
 
     async def _discover_equipment_field(self) -> str:
         """Introspecciona el tipo Site para hallar la conexion de equipos.

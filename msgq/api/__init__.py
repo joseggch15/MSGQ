@@ -35,6 +35,11 @@ class DataSource(Protocol):
         """Consolas AdaptMAC modificadas desde `updated_from`."""
         ...
 
+    async def fetch_changes(self, record_type: str,
+                            changes_from: datetime | None) -> list[dict]:
+        """Eventos del log de auditoria de `record_type` desde `changes_from`."""
+        ...
+
     async def aclose(self) -> None:
         """Libera recursos (conexiones HTTP)."""
         ...

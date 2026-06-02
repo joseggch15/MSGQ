@@ -121,6 +121,25 @@ query AdaptMacs($siteId: ID!, $first: Int, $after: String) {
 }
 """.strip()
 
+# --- Log de auditoria de cambios (Query.changes, top-level) ----------------
+# Cada ChangeEvent trae el diff `changes` (atributo, valor antes/despues), quien
+# (`whodunnit`) y cuando (`changedAt`). Filtrable por recordType y changesFrom.
+CHANGES_QUERY = """
+query Changes($filter: ChangeEventQuery, $first: Int, $after: String) {
+  changes(filter: $filter, first: $first, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    edges { node {
+      changedAt
+      recordType
+      recordId
+      event
+      whodunnit
+      changes { attribute before after }
+    } }
+  }
+}
+""".strip()
+
 # --- Introspeccion: campos del tipo Site (para hallar conexion de equipos) -
 SITE_FIELDS_INTROSPECTION = '{ __type(name: "Site") { fields { name } } }'
 
@@ -143,6 +162,7 @@ query EquipmentItems($siteId: ID!, $first: Int, $after: String) {{
     {field_name}(first: $first, after: $after) {{
       pageInfo {{ hasNextPage endCursor }}
       edges {{ node {{
+        id
         equipmentId
         fieldId
         description
