@@ -131,19 +131,21 @@ Los umbrales viven en `config.py` y son ajustables.
 El botón **"Analizar equipos…"** abre una ventana dedicada (lee de la réplica
 SQLite; no toca el poller) con:
 
-- **Inventario filtrable** por estado (In Service / Out of Service /
-  Decommissioned), tipo (propios / contratistas), categoría, grupo y texto.
-- **KPIs de flota**: total, en servicio, fuera de servicio, disponibilidad %,
-  contratistas, eventos RFID, transiciones In→Out.
-- **Agrupaciones**: por categoría, grupo, departamento y marca (con disponibilidad).
+- **Inventario filtrable** por estado, tipo (propios / contratistas), categoría,
+  grupo y texto. **Doble clic en un equipo → su Audit Log completo** (todos los
+  cambios con fecha, usuario y valor anterior→nuevo, como la ventana de AdaptIQ).
+- **KPIs de flota** + **agrupaciones** por categoría, grupo, departamento y marca.
 - **Cambios de RFID**: frecuencia (asignado / cambiado / removido) por mes y
   "re-tagueo" por registro de tag.
 - **Transiciones de estado**: cada cambio In↔Out↔Decom con equipo, fecha y
-  **quién** (`whodunnit`); resumen por tipo; y **tiempo medio en servicio** antes
-  de salir a Out.
-- **Auditoría (quién)**: cambios por usuario.
-- **Gráficas** (pyqtgraph): equipos por estado, disponibilidad por categoría,
-  cambios de RFID por mes y transiciones In→Out por mes.
+  **quién**; resumen por tipo; **top equipos Out→In y In→Out**; desglose **por
+  grupo** y **por cost centre**; y **tiempo medio en servicio** antes de salir.
+- **Cost center**: equipos que **más se reasignan de cost centre** y cost centres
+  con más actividad de reasignación.
+- **Atributos** que más se modifican y **auditoría por usuario**.
+- **Gráficas** (pyqtgraph): estado, disponibilidad por categoría, RFID por mes,
+  In→Out por mes, top Out→In y transiciones por grupo.
+- **Exportar a Excel**: vuelca todo el análisis a un workbook multi-hoja.
 
 **Fuente de datos:** el log de auditoría GraphQL (`Query.changes` →
 `ChangeEvent` con `changedAt` / `recordType` / `whodunnit` / diff `changes`).

@@ -460,6 +460,107 @@ def test_e2e_changes_via_simulator():
     print("OK  test_e2e_changes_via_simulator")
 
 
+def _eq_for_changes():
+    return transform.equipment_to_df([
+        {"id": "5", "equipmentId": "HTK0805", "description": "Dump 805", "status": "In Service",
+         "equipmentGroup": {"description": "Haul Trucks"}, "costCentre": {"description": "CC-1001"}},
+        {"id": "6", "equipmentId": "HTK0806", "description": "Dump 806", "status": "Out of Service",
+         "equipmentGroup": {"description": "Haul Trucks"}, "costCentre": {"description": "CC-2050"}},
+    ])
+
+
+# ===========================================================================
+# 13. Rankings de transiciones + por dimension (grupo / cost centre)
+# ===========================================================================
+
+def test_e2e_transition_rankings_and_dimension():
+    b = datetime(2026, 1, 1)
+    nodes = [
+        _chg_node("EquipmentItem", "5", "update", "equipment_status_id", "1", "2", b),
+        _chg_node("EquipmentItem", "5", "update", "equipment_status_id", "2", "1", b + timedelta(days=10)),
+        _chg_node("EquipmentItem", "5", "update", "equipment_status_id", "1", "2", b + timedelta(days=20)),
+        _chg_node("EquipmentItem", "6", "update", "equipment_status_id", "2", "1", b + timedelta(days=5)),
+        _chg_node("EquipmentItem", "6", "update", "equipment_status_id", "1", "2", b + timedelta(days=15)),
+    ]
+    ch = transform.change_events_to_df(nodes)
+    trans = ea.status_transitions(ch, _eq_for_changes())
+    assert "group" in trans.columns and trans["group"].iloc[0] == "Haul Trucks"
+
+    top_io = ea.top_equipment_by_transition(trans, config.STATUS_IN, config.STATUS_OUT)
+    assert int(top_io.iloc[0]["Veces"]) == 2 and top_io.iloc[0]["equipment_id"] == "HTK0805"
+
+    by_grp = ea.transitions_by_dimension(trans, "group", "Grupo")
+    row = by_grp[by_grp["Grupo"] == "Haul Trucks"].iloc[0]
+    assert int(row["Total"]) == 5 and int(row["In->Out"]) == 3 and int(row["Out->In"]) == 2
+    print("OK  test_e2e_transition_rankings_and_dimension")
+
+
+# ===========================================================================
+# 14. Cambios de cost centre
+# ===========================================================================
+
+def test_e2e_cost_centre_changes():
+    b = datetime(2026, 2, 1)
+    nodes = [
+        _chg_node("EquipmentItem", "5", "update", "cost_centre_id", "10", "11", b),
+        _chg_node("EquipmentItem", "5", "update", "cost_centre_id", "11", "12", b + timedelta(days=3)),
+        _chg_node("EquipmentItem", "6", "update", "cost_centre_id", "20", "21", b + timedelta(days=1)),
+    ]
+    ch = transform.change_events_to_df(nodes)
+    eq = _eq_for_changes()
+    top = ea.top_equipment_by_attribute(ch, config.ATTR_COST_CENTRE, eq, label="Cambios CC")
+    assert int(top.iloc[0]["Cambios CC"]) == 2 and top.iloc[0]["equipment_id"] == "HTK0805"
+
+    by_cc = ea.attribute_change_by_dimension(ch, config.ATTR_COST_CENTRE, eq, "cost_centre", "Cost Centre")
+    assert int(by_cc[by_cc["Cost Centre"] == "CC-1001"]["Cambios"].iloc[0]) == 2
+
+    summary = ea.attribute_change_summary(ch)
+    assert int(summary[summary["Atributo"] == "Cost Centre"]["Cambios"].iloc[0]) == 3
+    print("OK  test_e2e_cost_centre_changes")
+
+
+# ===========================================================================
+# 15. Audit log por equipo
+# ===========================================================================
+
+def test_e2e_equipment_audit_log():
+    b = datetime(2026, 3, 1)
+    nodes = [
+        _chg_node("EquipmentItem", "5", "update", "equipment_status_id", "1", "2", b),
+        _chg_node("EquipmentItem", "5", "update", "dispense_limited", "false", "true", b + timedelta(days=1)),
+        _chg_node("EquipmentItem", "6", "update", "make", None, "CAT", b),   # otro equipo
+    ]
+    ch = transform.change_events_to_df(nodes)
+    log = ea.equipment_audit_log(ch, "5")
+    assert len(log) == 2   # solo el equipo 5
+    status_row = log[log["Atributo"] == "Estado"].iloc[0]
+    assert status_row["De"] == "In Service" and status_row["A"] == "Out of Service"
+    print("OK  test_e2e_equipment_audit_log")
+
+
+# ===========================================================================
+# 16. Exportacion a Excel
+# ===========================================================================
+
+def test_e2e_export_sheets():
+    import openpyxl
+    from msgq.export import export_sheets
+    work = tempfile.mkdtemp(prefix="msgq_e2e_")
+    try:
+        path = os.path.join(work, "analisis.xlsx")
+        export_sheets(path, {
+            "Inventario": pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}),
+            "Vacia": pd.DataFrame(),
+        })
+        assert os.path.isfile(path)
+        wb = openpyxl.load_workbook(path)
+        assert "Inventario" in wb.sheetnames and "Vacia" in wb.sheetnames
+        assert wb["Inventario"]["A1"].value == "a"
+        print("OK  test_e2e_export_sheets")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 if __name__ == "__main__":
     tests = [
         test_e2e_simulator_pipeline_shapes,
@@ -474,6 +575,10 @@ if __name__ == "__main__":
         test_e2e_rfid_change_frequency,
         test_e2e_status_transitions,
         test_e2e_changes_via_simulator,
+        test_e2e_transition_rankings_and_dimension,
+        test_e2e_cost_centre_changes,
+        test_e2e_equipment_audit_log,
+        test_e2e_export_sheets,
     ]
     failed = 0
     for t in tests:

@@ -127,9 +127,30 @@ CHANGE_RECORD_EQUIPMENT = "EquipmentItem"
 CHANGE_RECORD_RFID      = "EquipmentRfid"   # cambios de tag RFID (atributo 'rfid')
 CHANGE_RECORD_TYPES = (CHANGE_RECORD_EQUIPMENT, CHANGE_RECORD_RFID)
 
-# Atributos clave dentro del diff de cambios.
-ATTR_STATUS = "equipment_status_id"   # en EquipmentItem
-ATTR_RFID   = "rfid"                  # en EquipmentRfid
+# Atributos clave dentro del diff de cambios (confirmados en vivo).
+ATTR_STATUS     = "equipment_status_id"   # en EquipmentItem (1/2/3)
+ATTR_RFID       = "rfid"                  # en EquipmentRfid
+ATTR_COST_CENTRE = "cost_centre_id"
+ATTR_GROUP      = "equipment_group_id"
+ATTR_CATEGORY   = "equipment_category_id"
+ATTR_DEPARTMENT = "department_id"
+
+# Etiquetas legibles para los atributos del log (para la vista de Audit Log y
+# el resumen de "atributos mas cambiados").
+ATTR_LABELS = {
+    "equipment_status_id": "Estado", "cost_centre_id": "Cost Centre",
+    "equipment_group_id": "Grupo", "equipment_category_id": "Categoria",
+    "department_id": "Departamento", "smu_value": "SMU Value",
+    "smu_value_source": "SMU Source", "service_interval": "Intervalo servicio",
+    "service_interval_type": "Tipo intervalo", "dispense_limited": "Dispense Limited",
+    "dispense_limit_period": "Periodo limite", "make": "Marca", "model": "Modelo",
+    "code": "Codigo", "field_id": "Field ID", "description": "Descripcion",
+    "division": "Division", "registration_number": "Matricula",
+    "erp_reference": "ERP Ref", "approver": "Aprobador", "contractor": "Contratista",
+    "field_description": "Field Desc", "rfid": "RFID", "fill_point_location": "Fill point",
+    "is_light_vehicle": "Vehiculo ligero", "is_contractor_vehicle": "Es contratista",
+    "is_tanker": "Es cisterna", "is_pod": "Es pod", "is_sap_exportable": "SAP exportable",
+}
 
 # Mapa id->estado (enum INS/OUTS/DECOMM == 1/2/3, confirmado en vivo).
 EQUIPMENT_STATUS_BY_ID = {

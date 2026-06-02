@@ -224,6 +224,18 @@ class SimulatorSource:
                     log.append(self._chg(when2, "EquipmentRfid", str(i), "update",
                                          rng.choice(self._EMAILS), "rfid", tag,
                                          f"56B{rng.randint(0x10000, 0xFFFFF):05X}"))
+        # Reasignaciones de cost centre y grupo en algunos equipos.
+        for e in rng.sample(self._fleet, min(10, len(self._fleet))):
+            for _ in range(rng.randint(1, 2)):
+                when = now - timedelta(days=rng.randint(5, 170))
+                log.append(self._chg(when, "EquipmentItem", e["internal_id"], "update",
+                                     rng.choice(self._EMAILS), "cost_centre_id",
+                                     str(rng.randint(10, 30)), str(rng.randint(10, 30))))
+        for e in rng.sample(self._fleet, min(5, len(self._fleet))):
+            when = now - timedelta(days=rng.randint(5, 170))
+            log.append(self._chg(when, "EquipmentItem", e["internal_id"], "update",
+                                 rng.choice(self._EMAILS), "equipment_group_id",
+                                 str(rng.randint(20, 40)), str(rng.randint(20, 40))))
         log.sort(key=lambda x: x["changedAt"])
         return log
 

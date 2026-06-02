@@ -32,6 +32,9 @@ class DataFrameModel(QAbstractTableModel):
         self._df = df if df is not None else pd.DataFrame()
         self.endResetModel()
 
+    def dataframe(self) -> pd.DataFrame:
+        return self._df
+
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._df)
 

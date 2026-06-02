@@ -189,12 +189,33 @@ def rfid_churn_by_tag(changes: pd.DataFrame) -> pd.DataFrame:
 # Temporal — Transiciones de estado (In <-> Out <-> Decom)
 # ===========================================================================
 
+_EQ_DIMS = ["equipment_id", "description", "group", "category", "cost_centre", "department"]
+
+
+def _link_equipment(df: pd.DataFrame, equipment: pd.DataFrame | None) -> pd.DataFrame:
+    """Agrega columnas del equipo (id/descripcion/grupo/categoria/cost centre/
+    departamento) a un df de cambios, enlazando record_id <-> internal_id."""
+    out = df.copy()
+    for c in _EQ_DIMS:
+        out[c] = pd.NA
+    if equipment is None or equipment.empty or "internal_id" not in equipment.columns:
+        return out
+    lut = equipment.dropna(subset=["internal_id"]).copy()
+    lut["internal_id"] = lut["internal_id"].astype("string")
+    lut = lut.drop_duplicates("internal_id").set_index("internal_id")
+    key = out["record_id"].astype("string")
+    for c in _EQ_DIMS:
+        if c in lut.columns:
+            out[c] = key.map(lut[c])
+    return out
+
+
 def status_transitions(changes: pd.DataFrame,
                        equipment: pd.DataFrame | None = None) -> pd.DataFrame:
     """Transiciones de estado por equipo, con nombres legibles y (si se pasa el
-    inventario) el equipment_id/description enlazados por `internal_id`."""
+    inventario) equipo/grupo/cost centre enlazados por `internal_id`."""
     cols = ["changed_at", "record_id", "equipment_id", "description",
-            "De", "A", "whodunnit"]
+            "group", "cost_centre", "De", "A", "whodunnit"]
     if changes is None or changes.empty:
         return pd.DataFrame(columns=cols)
     mask = (changes["record_type"] == config.CHANGE_RECORD_EQUIPMENT) & \
@@ -208,14 +229,133 @@ def status_transitions(changes: pd.DataFrame,
     df = df[df["before"].notna()]
     if df.empty:
         return pd.DataFrame(columns=cols)
-    df["equipment_id"] = pd.NA
-    df["description"] = pd.NA
-    if equipment is not None and not equipment.empty and "internal_id" in equipment.columns:
-        lut = equipment.dropna(subset=["internal_id"]).set_index(
-            equipment["internal_id"].astype("string"))
-        rid = df["record_id"].astype("string")
-        df["equipment_id"] = rid.map(lut["equipment_id"]) if "equipment_id" in lut else pd.NA
-        df["description"] = rid.map(lut["description"]) if "description" in lut else pd.NA
+    df = _link_equipment(df, equipment)
+    return df.sort_values("changed_at", ascending=False)[cols].reset_index(drop=True)
+
+
+def transitions_by_dimension(transitions: pd.DataFrame, dim_col: str,
+                             dim_label: str) -> pd.DataFrame:
+    """Transiciones agrupadas por una dimension del equipo (grupo, cost centre,
+    categoria, departamento), con desglose In->Out / Out->In."""
+    cols = [dim_label, "Total", "In->Out", "Out->In"]
+    if transitions is None or transitions.empty or dim_col not in transitions.columns:
+        return pd.DataFrame(columns=cols)
+    df = transitions.copy()
+    df["_k"] = (df[dim_col].astype("string").str.strip()
+                .replace({"": "(sin dato)"}).fillna("(sin dato)"))
+    rows = []
+    for k, ch in df.groupby("_k"):
+        rows.append({
+            dim_label: k, "Total": len(ch),
+            "In->Out": int(((ch["De"] == STATUS_IN) & (ch["A"] == STATUS_OUT)).sum()),
+            "Out->In": int(((ch["De"] == STATUS_OUT) & (ch["A"] == STATUS_IN)).sum()),
+        })
+    return pd.DataFrame(rows).sort_values("Total", ascending=False).reset_index(drop=True)
+
+
+def top_equipment_by_transition(transitions: pd.DataFrame, de: str, a: str,
+                                n: int = 25) -> pd.DataFrame:
+    """Equipos con mas transiciones del tipo `de`->`a` (p. ej. Out->In)."""
+    cols = ["equipment_id", "description", "group", "cost_centre", "Veces", "Ultimo"]
+    if transitions is None or transitions.empty:
+        return pd.DataFrame(columns=cols)
+    df = transitions[(transitions["De"] == de) & (transitions["A"] == a)]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    g = df.groupby("record_id").agg(
+        equipment_id=("equipment_id", "first"),
+        description=("description", "first"),
+        group=("group", "first"),
+        cost_centre=("cost_centre", "first"),
+        Veces=("changed_at", "size"),
+        Ultimo=("changed_at", "max")).reset_index(drop=True)
+    return g.sort_values("Veces", ascending=False).head(n)[cols].reset_index(drop=True)
+
+
+# --- Cambios por atributo (cost centre, grupo, etc.) -----------------------
+
+def attribute_changes(changes: pd.DataFrame, attribute: str,
+                      equipment: pd.DataFrame | None = None,
+                      real_only: bool = True) -> pd.DataFrame:
+    """Eventos de cambio de un atributo de EquipmentItem, enlazados al equipo."""
+    if changes is None or changes.empty:
+        return pd.DataFrame()
+    mask = (changes["record_type"] == config.CHANGE_RECORD_EQUIPMENT) & \
+           (changes["attribute"] == attribute)
+    df = changes[mask].copy()
+    if real_only:
+        df = df[df["before"].notna()]   # reasignacion, no alta inicial
+    if df.empty:
+        return pd.DataFrame()
+    df = _link_equipment(df, equipment)
+    return df.sort_values("changed_at", ascending=False).reset_index(drop=True)
+
+
+def top_equipment_by_attribute(changes: pd.DataFrame, attribute: str,
+                               equipment: pd.DataFrame | None = None,
+                               n: int = 25, label: str = "Cambios") -> pd.DataFrame:
+    """Equipos que mas veces cambiaron un atributo (p. ej. cost_centre_id)."""
+    cols = ["equipment_id", "description", "group", "cost_centre", label, "Ultimo"]
+    ac = attribute_changes(changes, attribute, equipment)
+    if ac.empty:
+        return pd.DataFrame(columns=cols)
+    g = ac.groupby("record_id").agg(
+        equipment_id=("equipment_id", "first"),
+        description=("description", "first"),
+        group=("group", "first"),
+        cost_centre=("cost_centre", "first"),
+        **{label: ("changed_at", "size")},
+        Ultimo=("changed_at", "max")).reset_index(drop=True)
+    return g.sort_values(label, ascending=False).head(n)[cols].reset_index(drop=True)
+
+
+def attribute_change_by_dimension(changes: pd.DataFrame, attribute: str,
+                                  equipment: pd.DataFrame | None,
+                                  dim_col: str, dim_label: str,
+                                  value_label: str = "Cambios") -> pd.DataFrame:
+    """Cambios de un atributo agrupados por una dimension del equipo (p. ej.
+    cambios de cost centre agrupados por el cost centre actual del equipo)."""
+    cols = [dim_label, value_label, "Equipos"]
+    ac = attribute_changes(changes, attribute, equipment)
+    if ac.empty or dim_col not in ac.columns:
+        return pd.DataFrame(columns=cols)
+    ac = ac.copy()
+    ac["_k"] = (ac[dim_col].astype("string").str.strip()
+                .replace({"": "(sin dato)"}).fillna("(sin dato)"))
+    g = ac.groupby("_k").agg(
+        **{value_label: ("changed_at", "size"), "Equipos": ("record_id", "nunique")}
+    ).reset_index().rename(columns={"_k": dim_label})
+    return g.sort_values(value_label, ascending=False).reset_index(drop=True)
+
+
+def attribute_change_summary(changes: pd.DataFrame) -> pd.DataFrame:
+    """Atributos de equipo que mas se modifican (reasignaciones reales)."""
+    cols = ["Atributo", "Cambios", "Equipos"]
+    if changes is None or changes.empty:
+        return pd.DataFrame(columns=cols)
+    mask = (changes["record_type"] == config.CHANGE_RECORD_EQUIPMENT) & changes["before"].notna()
+    df = changes[mask]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    g = df.groupby("attribute").agg(
+        Cambios=("changed_at", "size"), Equipos=("record_id", "nunique")).reset_index()
+    g["Atributo"] = g["attribute"].map(attr_label)
+    return g[cols].sort_values("Cambios", ascending=False).reset_index(drop=True)
+
+
+def equipment_audit_log(changes: pd.DataFrame, record_id: str) -> pd.DataFrame:
+    """Historial de cambios de UN equipo (como la pestaña Audit Log de AdaptIQ)."""
+    cols = ["changed_at", "whodunnit", "event", "Atributo", "De", "A"]
+    if changes is None or changes.empty or record_id is None:
+        return pd.DataFrame(columns=cols)
+    mask = (changes["record_type"] == config.CHANGE_RECORD_EQUIPMENT) & \
+           (changes["record_id"].astype("string") == str(record_id))
+    df = changes[mask].copy()
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df["Atributo"] = df["attribute"].map(attr_label)
+    df["De"] = df.apply(lambda r: _render_value(r["attribute"], r["before"]), axis=1)
+    df["A"] = df.apply(lambda r: _render_value(r["attribute"], r["after"]), axis=1)
     return df.sort_values("changed_at", ascending=False)[cols].reset_index(drop=True)
 
 
@@ -301,6 +441,22 @@ def audit_by_user(changes: pd.DataFrame) -> pd.DataFrame:
 # ===========================================================================
 # Helpers
 # ===========================================================================
+
+def attr_label(attr) -> str:
+    """Nombre legible de un atributo del log de auditoria."""
+    if attr is None:
+        return ""
+    return config.ATTR_LABELS.get(attr, str(attr).replace("_", " ").title())
+
+
+def _render_value(attr, val):
+    """Valor legible para el audit log (mapea ids de estado a su nombre)."""
+    if _is_na(val):
+        return None
+    if attr == config.ATTR_STATUS:
+        return config.EQUIPMENT_STATUS_BY_ID.get(str(val).strip(), val)
+    return val
+
 
 def _status_name(value) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
