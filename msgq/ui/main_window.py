@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
-from msgq.config import Settings
+from msgq.config import Settings, load_embedded_settings
 from msgq.core import alerts as al
 from msgq.ingest import Poller
 from msgq.io import load_equipment_csv
@@ -84,7 +84,11 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1100, 700)
         self.setStyleSheet(STYLESHEET)
 
-        self._settings = Settings.from_env()
+        # Si hay credenciales embebidas (msgq/embedded_config.py), modo kiosko:
+        # arranca solo y consulta el endpoint sin pedir token por pantalla.
+        embedded = load_embedded_settings()
+        self._kiosk = embedded is not None
+        self._settings = embedded if embedded is not None else Settings.from_env()
         self._db = Database(self._settings.db_path)
         self._poller: Poller | None = None
 
@@ -96,12 +100,16 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         lay = QVBoxLayout(root)
         lay.setSpacing(6)
-        lay.addWidget(self._build_connection())
+        lay.addWidget(self._build_kiosk_banner() if self._kiosk else self._build_connection())
         lay.addWidget(self._build_kpi_strip())
         lay.addWidget(self._build_tabs(), stretch=1)
 
-        self.statusBar().showMessage("Listo. Configura la conexion y pulsa «Iniciar monitoreo».")
         self._refresh_views()  # muestra lo que ya hubiera en la replica
+        if self._kiosk:
+            self.statusBar().showMessage("Conectando y cargando datos en tiempo real…")
+            QTimer.singleShot(250, self._start_monitoring)
+        else:
+            self.statusBar().showMessage("Listo. Configura la conexion y pulsa «Iniciar monitoreo».")
 
     # =======================================================================
     # Construccion de la interfaz
@@ -187,6 +195,25 @@ class MainWindow(QMainWindow):
         self._eq_window = EquipmentWindow(self._db, self)
         self._eq_window.show()
 
+    def _build_kiosk_banner(self) -> QGroupBox:
+        """Banner de la version turnkey (sin token por pantalla) + acceso al análisis."""
+        box = QGroupBox("Monitoreo en tiempo real")
+        row = QHBoxLayout(box)
+        live = QLabel("●  EN VIVO")
+        live.setStyleSheet("color:#2E7D32; font-weight:bold;")
+        row.addWidget(live)
+        site = self._settings.site_id or self._settings.site_match
+        info = QLabel(f"{self._settings.endpoint}    ·    Site: {site}    ·    "
+                      f"actualiza cada {self._settings.poll_seconds}s")
+        info.setStyleSheet("color:#5A6B7B;")
+        row.addWidget(info)
+        row.addStretch(1)
+        self.btn_analyze = QPushButton("Analizar equipos…")
+        self.btn_analyze.setObjectName("accent")
+        self.btn_analyze.clicked.connect(self._on_open_equipment)
+        row.addWidget(self.btn_analyze)
+        return box
+
     def _build_kpi_strip(self) -> QFrame:
         frame = QFrame()
         frame.setFrameShape(QFrame.StyledPanel)
@@ -252,19 +279,21 @@ class MainWindow(QMainWindow):
         else:
             self._settings.site_id = ""
             self._settings.site_match = site_val or "Merian"
+        self._start_monitoring()
 
+    def _start_monitoring(self):
+        """Arranca el poller con la configuracion actual (manual o embebida)."""
         self._stop_poller()  # por si habia uno corriendo
-
         self._poller = Poller(self._settings, self._db)
         self._poller.cycle_completed.connect(self._on_cycle)
         self._poller.status.connect(self.statusBar().showMessage)
         self._poller.failed.connect(self._on_failed)
         self._poller.start()
-
         self._refresh_timer.start()
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
-        self._set_inputs_enabled(False)
+        if not self._kiosk:
+            self.btn_start.setEnabled(False)
+            self.btn_stop.setEnabled(True)
+            self._set_inputs_enabled(False)
 
     def _on_stop(self):
         self._stop_poller()

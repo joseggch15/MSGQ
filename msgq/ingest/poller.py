@@ -106,6 +106,9 @@ class Poller(QThread):
         """Trae el log de auditoria de equipos/RFID (semi-maestro). Primer run:
         historico completo; luego incremental por watermark sobre `changed_at`."""
         watermark = self._db.get_watermark("change_events")
+        if watermark is None:
+            self.status.emit("Sincronizando historial de cambios (primer arranque, "
+                             "puede tardar unos minutos)…")
         if watermark:
             changes_from = watermark - _WATERMARK_EPSILON
         else:

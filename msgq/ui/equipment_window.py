@@ -17,7 +17,7 @@ from __future__ import annotations
 import traceback
 
 import pandas as pd
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
@@ -83,6 +83,16 @@ class EquipmentWindow(QMainWindow):
         lay.addWidget(self._build_kpis())
         lay.addWidget(self._build_tabs(), stretch=1)
         self._refresh()
+
+        # Auto-refresco: recoge los datos a medida que el poller los sincroniza.
+        self._timer = QTimer(self)
+        self._timer.setInterval(10000)
+        self._timer.timeout.connect(self._refresh)
+        self._timer.start()
+
+    def closeEvent(self, event):  # noqa: N802 - override Qt
+        self._timer.stop()
+        event.accept()
 
     # --- Controles ----------------------------------------------------------
 

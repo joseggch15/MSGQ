@@ -244,3 +244,32 @@ def _bool_env(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on", "si"}
+
+
+# ---------------------------------------------------------------------------
+# Credenciales embebidas (version turnkey / kiosko)
+# ---------------------------------------------------------------------------
+
+def load_embedded_settings() -> "Settings | None":
+    """Carga credenciales embebidas desde `msgq/embedded_config.py` si existe.
+
+    Devuelve un `Settings` listo (demo_mode=False) cuando el modulo esta presente
+    y trae un TOKEN; en caso contrario None y la app usa el flujo manual (token
+    por pantalla). `embedded_config.py` esta en .gitignore: nunca se versiona.
+    """
+    try:
+        from msgq import embedded_config as ec  # type: ignore
+    except Exception:
+        return None
+    token = str(getattr(ec, "TOKEN", "") or "").strip()
+    if not token:
+        return None
+    return Settings(
+        endpoint=str(getattr(ec, "ENDPOINT", DEFAULT_ENDPOINT)).strip(),
+        token=token,
+        site_id=str(getattr(ec, "SITE_ID", "") or "").strip(),
+        site_match=str(getattr(ec, "SITE_MATCH", "Merian")).strip(),
+        poll_seconds=int(getattr(ec, "POLL_SECONDS", DEFAULT_POLL_SECONDS)),
+        demo_mode=False,
+        db_path=str(getattr(ec, "DB_PATH", "") or DEFAULT_DB_PATH),
+    )
