@@ -21,6 +21,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from msgq.i18n import current_language
+from msgq.ui import theme
 
 pg.setConfigOptions(antialias=True, background="w", foreground="k")
 
@@ -64,7 +65,11 @@ class _HoverChart(QWidget):
                  value_suffix: str = "", axis_items: dict | None = None):
         super().__init__()
         self._value_suffix = value_suffix
+        # Colores del tema activo (claro/oscuro) para el lienzo y los ejes.
+        bg, fg = theme.chart_colors()
+        pg.setConfigOption("foreground", fg)
         self._plot = pg.PlotWidget(axisItems=axis_items or {})
+        self._plot.setBackground(bg)
         self._plot.setTitle(title)
         if y_label:
             self._plot.setLabel("left", y_label)

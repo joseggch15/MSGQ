@@ -33,9 +33,10 @@ from msgq.core import equipment_analytics as ea
 from msgq.export import export_sheets
 from msgq.i18n import current_language, set_language, t, tr_fmt, tr_value
 from msgq.storage import Database
+from msgq.ui import theme
 from msgq.ui.charts import BarChart, TimeSeriesChart
 from msgq.ui.common import (
-    kpi_label, language_selector, make_table, warn_label, wrap_with_search,
+    kpi_label, language_selector, make_table, theme_selector, warn_label, wrap_with_search,
 )
 
 _INVENTORY_COLS = [
@@ -108,11 +109,22 @@ class EquipmentWindow(QMainWindow):
         else:
             set_language(code)
             self._qsettings.setValue("language", code)
-            self.apply_external_language()
+            self.rebuild_ui()
 
-    def apply_external_language(self) -> None:
-        """Reconstruye esta ventana en el idioma global actual (lo invoca la
-        ventana principal al cambiar el idioma)."""
+    def _on_theme_changed(self, name: str) -> None:
+        if not name or name == theme.current_theme():
+            return
+        if self._main is not None and hasattr(self._main, "switch_theme"):
+            self._main.switch_theme(name)
+        else:
+            theme.set_theme(name)
+            self._qsettings.setValue("theme", name)
+            theme.apply_theme()
+            self.rebuild_ui()
+
+    def rebuild_ui(self) -> None:
+        """Reconstruye esta ventana en el idioma/tema global actual (la invoca la
+        ventana principal al cambiar idioma o tema; recolorea KPIs y gráficas)."""
         self.setWindowTitle(t("MSGQ — Análisis de Equipos  ·  Newmont Merian"))
         self._build_central()
         self._refresh()
@@ -171,11 +183,12 @@ class EquipmentWindow(QMainWindow):
         row.addWidget(QLabel(t("Buscar:"))); row.addWidget(self.txt_search, stretch=1)
         row.addWidget(btn_refresh); row.addWidget(btn_export)
         row.addWidget(language_selector(self._on_language_changed))
+        row.addWidget(theme_selector(self._on_theme_changed))
         return box
 
     def _build_kpis(self) -> QFrame:
         frame = QFrame(); frame.setFrameShape(QFrame.StyledPanel)
-        frame.setStyleSheet("QFrame{background:#EDF1F6; border-radius:6px;}")
+        frame.setStyleSheet(f"QFrame{{background:{theme.panel_bg()}; border-radius:6px;}}")
         self._kpi_layout = QHBoxLayout(frame)
         self._kpi_layout.setContentsMargins(8, 6, 8, 6)
         return frame
@@ -214,7 +227,8 @@ class EquipmentWindow(QMainWindow):
 
     def _build_rfid_tab(self) -> QWidget:
         c = QWidget(); lay = QVBoxLayout(c)
-        self.lbl_rfid = QLabel(); self.lbl_rfid.setStyleSheet("font-weight:bold; color:#1F4E78;")
+        self.lbl_rfid = QLabel()
+        self.lbl_rfid.setStyleSheet(f"font-weight:bold; color:{theme.accent('#1F4E78')};")
         lay.addWidget(self.lbl_rfid)
         split = QSplitter(Qt.Vertical)
         for title, attr in ((t("Eventos de RFID por mes (asignado / cambiado / removido)"), "tbl_rfid_time"),

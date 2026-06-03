@@ -177,6 +177,8 @@ _EN.update({
     "Filtrar por cualquier texto...": "Filter by any text...",
     "Si": "Yes",
     "No": "No",
+    "Claro": "Light",
+    "Oscuro": "Dark",
     # --- KPIs ventana principal ---
     "Movimientos (24h)": "Movements (24h)",
     "Volumen 24h (L)": "Volume 24h (L)",

@@ -33,48 +33,15 @@ from msgq.i18n import LANGUAGES, current_language, set_language, t, tr_fmt
 from msgq.ingest import Poller
 from msgq.io import load_equipment_csv
 from msgq.storage import Database
-from msgq.ui.common import kpi_label, language_selector, make_table, warn_label, wrap_with_search
+from msgq.ui import theme
+from msgq.ui.common import (
+    kpi_label, language_selector, make_table, theme_selector, warn_label, wrap_with_search,
+)
 
+# Colores semánticos de las tarjetas KPI (kpi_label los ajusta al tema activo).
 PRIMARY = "#1F4E78"
 ACCENT = "#2E7D32"
 DANGER = "#C62828"
-BG = "#F4F6F9"
-
-STYLESHEET = f"""
-QMainWindow, QWidget {{ background: {BG}; color: #1A1A1A; }}
-QGroupBox {{
-    font-weight: bold; color: {PRIMARY};
-    border: 1px solid #C9D3DF; border-radius: 8px;
-    margin-top: 14px; padding: 10px;
-}}
-QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 4px; }}
-QPushButton {{
-    background: {PRIMARY}; color: white; border: none;
-    border-radius: 6px; padding: 7px 14px; font-weight: bold;
-}}
-QPushButton:hover {{ background: #2A5F92; }}
-QPushButton:disabled {{ background: #9AA8B8; color: white; }}
-QPushButton#accent {{ background: {ACCENT}; }}
-QPushButton#danger {{ background: {DANGER}; }}
-QTabWidget::pane {{ border: 1px solid #C9D3DF; border-radius: 6px; background: white; }}
-QTabBar::tab {{
-    background: #E3E9F0; color: #1A1A1A; padding: 8px 16px; margin-right: 2px;
-    border-top-left-radius: 6px; border-top-right-radius: 6px;
-}}
-QTabBar::tab:selected {{ background: white; color: {PRIMARY}; font-weight: bold; }}
-QTableView {{
-    background: white; alternate-background-color: #EAF1F8;
-    gridline-color: #DCE3EB; color: #1A1A1A;
-    selection-background-color: #D0E4F7; selection-color: #1A1A1A;
-}}
-QHeaderView::section {{
-    background: {PRIMARY}; color: white; padding: 6px; border: none; font-weight: bold;
-}}
-QLineEdit, QSpinBox {{
-    background: white; color: #1A1A1A; border: 1px solid #C9D3DF;
-    border-radius: 5px; padding: 4px;
-}}
-"""
 
 # Refresco visual desacoplado del polling (lee de SQLite).
 _REFRESH_MS = 2000
@@ -86,9 +53,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._qsettings = QSettings("NewmontMerian", "MSGQ")
         set_language(self._qsettings.value("language", "es"))
+        theme.set_theme(self._qsettings.value("theme", "light"))
+        theme.apply_theme()   # QSS a nivel de QApplication (cubre ambas ventanas)
         self.resize(1480, 880)
         self.setMinimumSize(1100, 700)
-        self.setStyleSheet(STYLESHEET)
 
         # Si hay credenciales embebidas (msgq/embedded_config.py), modo kiosko:
         # arranca solo y consulta el endpoint sin pedir token por pantalla.
@@ -120,21 +88,33 @@ class MainWindow(QMainWindow):
     # =======================================================================
 
     def switch_language(self, code: str) -> None:
-        """Cambia el idioma global, lo recuerda y reconstruye esta ventana (y la
-        de análisis si está abierta)."""
+        """Cambia el idioma global, lo recuerda y reconstruye la interfaz."""
         if not code or code == current_language():
             return
         set_language(code)
         self._qsettings.setValue("language", code)
-        self._apply_language()
-        eqw = self._eq_window
-        if eqw is not None and eqw.isVisible():
-            eqw.apply_external_language()
+        self._rebuild_ui()
+
+    def switch_theme(self, name: str) -> None:
+        """Cambia el tema (claro/oscuro), lo recuerda, re-aplica el QSS global y
+        reconstruye la interfaz (para que tarjetas KPI y gráficas se recoloreen)."""
+        if not name or name == theme.current_theme():
+            return
+        theme.set_theme(name)
+        self._qsettings.setValue("theme", name)
+        theme.apply_theme()
+        self._rebuild_ui()
 
     def _on_language_changed(self, code: str) -> None:
         self.switch_language(code)
 
-    def _apply_language(self) -> None:
+    def _on_theme_changed(self, name: str) -> None:
+        self.switch_theme(name)
+
+    def _rebuild_ui(self) -> None:
+        """Reconstruye esta ventana (y la de análisis si está abierta) tras un
+        cambio de idioma o de tema. Garantiza cobertura total de la traducción y
+        del recoloreo, conservando el motor de polling activo."""
         self.setWindowTitle(t("MSGQ — Monitor FMS AdaptIQ  ·  Newmont Merian"))
         self._build_central()
         if not self._kiosk:
@@ -143,6 +123,9 @@ class MainWindow(QMainWindow):
             self._set_inputs_enabled(not self._monitoring)
         self._last_counts = None
         self._refresh_views(force=True)
+        eqw = self._eq_window
+        if eqw is not None and eqw.isVisible():
+            eqw.rebuild_ui()
 
     # =======================================================================
     # Construccion de la interfaz
@@ -171,6 +154,7 @@ class MainWindow(QMainWindow):
         self.ed_token.setPlaceholderText("Authorization: Token token=<...>")
         r1.addWidget(self.ed_token, stretch=1)
         r1.addWidget(language_selector(self._on_language_changed))
+        r1.addWidget(theme_selector(self._on_theme_changed))
         col.addLayout(r1)
 
         r2 = QHBoxLayout()
@@ -252,6 +236,7 @@ class MainWindow(QMainWindow):
         row.addWidget(info)
         row.addStretch(1)
         row.addWidget(language_selector(self._on_language_changed))
+        row.addWidget(theme_selector(self._on_theme_changed))
         self.btn_analyze = QPushButton(t("Analizar equipos…"))
         self.btn_analyze.setObjectName("accent")
         self.btn_analyze.clicked.connect(self._on_open_equipment)
@@ -261,7 +246,7 @@ class MainWindow(QMainWindow):
     def _build_kpi_strip(self) -> QFrame:
         frame = QFrame()
         frame.setFrameShape(QFrame.StyledPanel)
-        frame.setStyleSheet("QFrame{background:#EDF1F6; border-radius:6px;}")
+        frame.setStyleSheet(f"QFrame{{background:{theme.panel_bg()}; border-radius:6px;}}")
         self._kpi_layout = QHBoxLayout(frame)
         self._kpi_layout.setContentsMargins(8, 6, 8, 6)
         self._kpi_layout.addWidget(QLabel(t("Sin datos todavia.")))

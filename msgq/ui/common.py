@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 )
 
 from msgq.i18n import LANGUAGES, current_language, t
+from msgq.ui import theme
 from msgq.ui.table_model import SORT_ROLE, DataFrameModel
 
 
@@ -46,12 +47,13 @@ def wrap_with_search(table: QTableView) -> QWidget:
 
 
 def kpi_label(title: str, value: str, color: str = "#1F4E78") -> QLabel:
-    """Tarjeta KPI compacta con titulo y valor coloreado."""
+    """Tarjeta KPI compacta con titulo y valor coloreado (sensible al tema)."""
+    c = theme.accent(color)
     lbl = QLabel(f"<b>{title}</b><br><span style='font-size:15px'>{value}</span>")
     lbl.setTextFormat(Qt.RichText)
     lbl.setStyleSheet(
-        f"QLabel {{ border: 1px solid {color}; border-radius: 6px; "
-        f"padding: 6px 14px; color: {color}; background: white; }}"
+        f"QLabel {{ border: 1px solid {c}; border-radius: 6px; "
+        f"padding: 6px 14px; color: {c}; background: {theme.card_bg()}; }}"
     )
     lbl.setMinimumWidth(130)
     return lbl
@@ -79,5 +81,25 @@ def language_selector(on_change) -> QWidget:
     combo.setCurrentIndex(ix)
     combo.currentIndexChanged.connect(lambda i: on_change(combo.itemData(i)))
     combo.setMaximumWidth(120)
+    lay.addWidget(combo)
+    return w
+
+
+def theme_selector(on_change) -> QWidget:
+    """Selector de tema (🌓 + combo claro/oscuro) reutilizable. `on_change(code)`
+    recibe 'light'/'dark'. El tema actual queda preseleccionado sin disparar la
+    señal (se conecta después de fijar el índice)."""
+    w = QWidget()
+    lay = QHBoxLayout(w)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(4)
+    lay.addWidget(QLabel("🌓"))
+    combo = QComboBox()
+    for code, label in theme.THEMES:
+        combo.addItem(t(label), code)
+    ix = next((i for i, (c, _) in enumerate(theme.THEMES) if c == theme.current_theme()), 0)
+    combo.setCurrentIndex(ix)
+    combo.currentIndexChanged.connect(lambda i: on_change(combo.itemData(i)))
+    combo.setMaximumWidth(110)
     lay.addWidget(combo)
     return w
