@@ -35,6 +35,14 @@ class DataSource(Protocol):
         """Consolas AdaptMAC modificadas desde `updated_from`."""
         ...
 
+    async def fetch_tanks(self, updated_from: datetime | None) -> list[dict]:
+        """Tanques del sitio (registro maestro)."""
+        ...
+
+    async def fetch_reconciliations(self, updated_from: datetime | None) -> list[dict]:
+        """Reconciliaciones diarias por tanque modificadas desde `updated_from`."""
+        ...
+
     async def fetch_changes(self, record_type: str,
                             changes_from: datetime | None) -> list[dict]:
         """Eventos del log de auditoria de `record_type` desde `changes_from`."""

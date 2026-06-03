@@ -34,12 +34,16 @@ _NUMERIC = {
     "equipment": {"service_interval", "smu_value"},
     "adaptmac": set(),
     "change_events": set(),
+    "tanks": {"capacity"},
+    "reconciliations": {"opening_stock", "closing_stock", "inflow", "outflow", "error"},
 }
 _DATETIME = {
     "movements": {"record_collected_at", "created_at", "updated_at"},
     "equipment": {"smu_value_date", "updated_at"},
     "adaptmac": {"last_successful_comms", "last_failed_comms", "updated_at"},
     "change_events": {"changed_at"},
+    "tanks": set(),
+    "reconciliations": {"period_start", "period_end", "updated_at"},
 }
 _BOOL = {
     "movements": {"is_service_truck"},
@@ -47,6 +51,8 @@ _BOOL = {
                   "is_contractor_vehicle", "dispense_limited"},
     "adaptmac": {"online", "key_bypass"},
     "change_events": set(),
+    "tanks": {"virtual", "enabled"},
+    "reconciliations": set(),
 }
 
 # Metadatos por entidad: (tabla, columnas, clave primaria).
@@ -55,12 +61,15 @@ _ENTITIES = {
     "equipment": (config.EQUIPMENT_COLS, "equipment_id"),
     "adaptmac":  (config.ADAPTMAC_COLS, "code"),
     "change_events": (config.CHANGE_EVENT_COLS, "event_key"),
+    "tanks": (config.TANK_COLS, "tank_id"),
+    "reconciliations": (config.RECONCILIATION_COLS, "id"),
 }
 
-# Columna temporal de cada entidad (para indice y watermark).
+# Columna temporal de cada entidad (para indice y watermark). None = sin tiempo.
 _TS_COL = {
     "movements": "updated_at", "equipment": "updated_at",
     "adaptmac": "updated_at", "change_events": "changed_at",
+    "tanks": None, "reconciliations": "updated_at",
 }
 
 
@@ -205,6 +214,12 @@ class Database:
             return self.read("change_events", where='"record_type" = ?',
                              params=(record_type,), order_by='"changed_at" DESC')
         return self.read("change_events", order_by='"changed_at" DESC')
+
+    def get_tanks(self) -> pd.DataFrame:
+        return self.read("tanks", order_by='"code"')
+
+    def get_reconciliations(self) -> pd.DataFrame:
+        return self.read("reconciliations", order_by='"period_end" DESC')
 
     def row_count(self, entity: str) -> int:
         with self._lock:

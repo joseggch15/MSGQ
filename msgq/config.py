@@ -119,6 +119,23 @@ CHANGE_EVENT_COLS = [
     "event", "whodunnit", "attribute", "before", "after",
 ]
 
+# Un tanque del sitio (registro maestro). `virtual`=tanque logico cuyo nivel es
+# la suma de sus hijos (parent_tank apunta al virtual). `code` es la clave.
+TANK_COLS = [
+    "tank_id", "code", "description", "name", "product", "virtual",
+    "capacity", "volume_unit", "enabled", "parent_tank", "tank_type",
+]
+
+# Una reconciliacion diaria por tanque (el reporte 'Detailed Reconciliation' que
+# AdaptIQ pre-calcula): stock medido (opening/closing) vs movimiento
+# (inflow/outflow). `error` = (closing-opening) - (inflow-outflow), tal cual lo
+# entrega el campo `volume` de la Reconciliation. `tank` = code del tanque.
+RECONCILIATION_COLS = [
+    "id", "period_start", "period_end", "tank", "tank_description", "product",
+    "opening_stock", "closing_stock", "inflow", "outflow", "error",
+    "status", "updated_at",
+]
+
 # ---------------------------------------------------------------------------
 # Auditoria de equipos (validado contra el tenant de Merian)
 # ---------------------------------------------------------------------------

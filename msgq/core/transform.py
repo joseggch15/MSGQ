@@ -161,6 +161,44 @@ def flatten_equipment(node: dict) -> dict:
     }
 
 
+def flatten_tank(node: dict) -> dict:
+    """Aplana un Tank del sitio. `parent_tank` (code) enlaza satelites -> virtual."""
+    return {
+        "tank_id":      node.get("id"),
+        "code":         node.get("code"),
+        "description":  node.get("description"),
+        "name":         node.get("name"),
+        "product":      _label(node.get("product")),
+        "virtual":      node.get("virtual"),
+        "capacity":     node.get("capacity"),
+        "volume_unit":  node.get("volumeUnit"),
+        "enabled":      node.get("enabled"),
+        "parent_tank":  _dig(node, "parentTank", "code"),
+        "tank_type":    _label(node.get("tankType")),
+    }
+
+
+def flatten_reconciliation(node: dict) -> dict:
+    """Aplana una Reconciliation (diaria por tanque). `error` = campo `volume`
+    de la API = (closing-opening) - (inflow-outflow). `tank` = code del target."""
+    target = node.get("target") or {}
+    return {
+        "id":               node.get("id"),
+        "period_start":     node.get("periodStart"),
+        "period_end":       node.get("periodEnd"),
+        "tank":             target.get("code"),
+        "tank_description": target.get("description"),
+        "product":          _label(node.get("product")),
+        "opening_stock":    node.get("openingStock"),
+        "closing_stock":    node.get("closingStock"),
+        "inflow":           node.get("inflowVolume"),
+        "outflow":          node.get("outflowVolume"),
+        "error":            node.get("volume"),
+        "status":           node.get("status"),
+        "updated_at":       node.get("recordUpdatedAt"),
+    }
+
+
 def flatten_adaptmac(node: dict) -> dict:
     return {
         "code":                  node.get("code"),
@@ -191,6 +229,10 @@ _EQUIPMENT_NUMERIC = ["service_interval", "smu_value"]
 _EQUIPMENT_DATETIME = ["smu_value_date", "updated_at"]
 
 _ADAPTMAC_DATETIME = ["last_successful_comms", "last_failed_comms", "updated_at"]
+
+_TANK_NUMERIC = ["capacity"]
+_RECON_NUMERIC = ["opening_stock", "closing_stock", "inflow", "outflow", "error"]
+_RECON_DATETIME = ["period_start", "period_end", "updated_at"]
 
 
 def _build_df(rows: list[dict], columns: list[str],
@@ -224,6 +266,16 @@ def equipment_to_df(nodes: list[dict]) -> pd.DataFrame:
 def adaptmacs_to_df(nodes: list[dict]) -> pd.DataFrame:
     rows = [flatten_adaptmac(n) for n in nodes]
     return _build_df(rows, config.ADAPTMAC_COLS, None, _ADAPTMAC_DATETIME)
+
+
+def tanks_to_df(nodes: list[dict]) -> pd.DataFrame:
+    rows = [flatten_tank(n) for n in nodes]
+    return _build_df(rows, config.TANK_COLS, _TANK_NUMERIC)
+
+
+def reconciliations_to_df(nodes: list[dict]) -> pd.DataFrame:
+    rows = [flatten_reconciliation(n) for n in nodes]
+    return _build_df(rows, config.RECONCILIATION_COLS, _RECON_NUMERIC, _RECON_DATETIME)
 
 
 # ===========================================================================

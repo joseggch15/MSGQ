@@ -18,6 +18,7 @@ from msgq import config
 from msgq.api import make_source
 from msgq.core import tank_analytics as ta
 from msgq.core import transform
+from msgq.storage import Database
 
 DISP, DELI, TRAN = config.KIND_DISPENSE, config.KIND_DELIVERY, config.KIND_TRANSFER
 _WHEN = datetime(2026, 1, 15, 8, 0, 0)
@@ -207,6 +208,80 @@ def test_tank_analytics_via_simulator():
     print("OK  test_tank_analytics_via_simulator")
 
 
+# ===========================================================================
+# 8. Pipeline de TANQUES (endpoint -> transform): forma y simulador
+# ===========================================================================
+
+def test_tanks_pipeline():
+    import asyncio
+    src = make_source(config.Settings(demo_mode=True, token="", db_path=":memory:"))
+    nodes = asyncio.run(src.fetch_tanks(None))
+    asyncio.run(src.aclose())
+    df = transform.tanks_to_df(nodes)
+    assert list(df.columns) == config.TANK_COLS
+    codes = set(df["code"])
+    assert {"LFO - Main Tank", "LFO - Virtual Tank", "LFO - 174-TK-01"} <= codes
+    # El Virtual Tank esta marcado como virtual; los satelites apuntan a el.
+    assert bool(df.loc[df["code"] == "LFO - Virtual Tank", "virtual"].iloc[0]) is True
+    sat = df[df["code"] == "LFO - 171-TK-03"].iloc[0]
+    assert sat["parent_tank"] == "LFO - Virtual Tank"
+    print("OK  test_tanks_pipeline")
+
+
+# ===========================================================================
+# 9. Pipeline de RECONCILIACIONES: forma + aritmetica del error
+# ===========================================================================
+
+def test_reconciliations_pipeline():
+    import asyncio
+    src = make_source(config.Settings(demo_mode=True, token="", db_path=":memory:"))
+    nodes = asyncio.run(src.fetch_reconciliations(None))
+    asyncio.run(src.aclose())
+    df = transform.reconciliations_to_df(nodes)
+    assert list(df.columns) == config.RECONCILIATION_COLS
+    assert not df.empty and "LFO - Main Tank" in set(df["tank"])
+    # error == (closing - opening) - (inflow - outflow), tal cual el API.
+    r = df.iloc[0]
+    recomputed = (r["closing_stock"] - r["opening_stock"]) - (r["inflow"] - r["outflow"])
+    assert abs(float(r["error"]) - recomputed) < 0.1
+    assert set(df["status"].dropna()) <= {"all_ok", "unconfirmed", "pending"}
+    print("OK  test_reconciliations_pipeline")
+
+
+# ===========================================================================
+# 10. Ida y vuelta por SQLite (upsert idempotente + dtypes restaurados)
+# ===========================================================================
+
+def test_tanks_recons_storage_roundtrip():
+    import asyncio
+    import tempfile
+    import shutil
+    work = tempfile.mkdtemp(prefix="msgq_tank_")
+    try:
+        db = Database(os.path.join(work, "r.sqlite3"))
+        src = make_source(config.Settings(demo_mode=True, token="", db_path=":memory:"))
+        tanks = transform.tanks_to_df(asyncio.run(src.fetch_tanks(None)))
+        recons = transform.reconciliations_to_df(asyncio.run(src.fetch_reconciliations(None)))
+        asyncio.run(src.aclose())
+
+        db.upsert("tanks", tanks); db.upsert("tanks", tanks)         # idempotente
+        db.upsert("reconciliations", recons); db.upsert("reconciliations", recons)
+        assert db.row_count("tanks") == len(tanks)
+        assert db.row_count("reconciliations") == len(recons)
+
+        back_t = db.get_tanks()
+        assert list(back_t.columns) == config.TANK_COLS
+        import pandas as pd
+        assert pd.api.types.is_numeric_dtype(back_t["capacity"])
+        back_r = db.get_reconciliations()
+        assert pd.api.types.is_numeric_dtype(back_r["opening_stock"])
+        assert pd.api.types.is_datetime64_any_dtype(back_r["period_end"])
+        db.close()
+        print("OK  test_tanks_recons_storage_roundtrip")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 if __name__ == "__main__":
     tests = [
         test_classify_circuit,
@@ -216,6 +291,9 @@ if __name__ == "__main__":
         test_flow_by_tank_and_over_time,
         test_circuit_summary_and_filter,
         test_tank_analytics_via_simulator,
+        test_tanks_pipeline,
+        test_reconciliations_pipeline,
+        test_tanks_recons_storage_roundtrip,
     ]
     failed = 0
     for t in tests:

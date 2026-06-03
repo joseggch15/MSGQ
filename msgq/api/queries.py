@@ -140,6 +140,47 @@ query Changes($filter: ChangeEventQuery, $first: Int, $after: String) {
 }
 """.strip()
 
+# --- Tanques del sitio (conexion paginada; registro maestro) ---------------
+# Confirmado en vivo: `tanks` expone code/description/virtual/parentTank (para
+# reconstruir circuitos y el Virtual Tank), capacity, product, tankType.
+TANKS_QUERY = """
+query Tanks($siteId: ID!, $first: Int, $after: String) {
+  site(id: $siteId) {
+    tanks(first: $first, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      edges { node {
+        id code description name virtual enabled capacity volumeUnit
+        product { code description }
+        parentTank { code }
+        tankType { description }
+      } }
+    }
+  }
+}
+""".strip()
+
+# --- Reconciliacion diaria por tanque ('Detailed Reconciliation' nativo) ----
+# Confirmado en vivo: una fila por tanque/dia con openingStock, closingStock,
+# inflowVolume, outflowVolume y `volume` (= error de reconciliacion). Filtrable
+# incremental por `filter:{updatedFrom}` (tipo MovementQuery), igual que los
+# movimientos. `status` ∈ {all_ok, unconfirmed, pending}.
+RECONCILIATIONS_QUERY = """
+query Reconciliations($siteId: ID!, $filter: MovementQuery, $first: Int, $after: String) {
+  site(id: $siteId) {
+    reconciliations(filter: $filter, first: $first, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      edges { node {
+        id periodStart periodEnd
+        openingStock closingStock inflowVolume outflowVolume volume
+        status recordUpdatedAt
+        target { code description }
+        product { code description }
+      } }
+    }
+  }
+}
+""".strip()
+
 # --- Introspeccion: campos del tipo Site (para hallar conexion de equipos) -
 SITE_FIELDS_INTROSPECTION = '{ __type(name: "Site") { fields { name } } }'
 

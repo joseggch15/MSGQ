@@ -29,6 +29,9 @@ from msgq.storage.db import Database
 # registros con timestamp en el limite exacto (el upsert los hace idempotentes).
 _WATERMARK_EPSILON = timedelta(seconds=1)
 
+# Primer arranque: ventana de reconciliaciones a traer (luego es incremental).
+_RECON_INITIAL_DAYS = 365
+
 
 class Poller(QThread):
     """Hilo de sincronizacion continua FMS -> SQLite."""
@@ -92,6 +95,7 @@ class Poller(QThread):
         """Movimientos en cada ciclo (incremental); equipos y consolas (datos
         maestros) cada `slow_refresh_cycles` ciclos, y siempre en el primero."""
         stats: dict[str, int] = {"movements": await self._sync_movements(source)}
+        stats["reconciliations"] = await self._sync_reconciliations(source)
 
         every = max(1, self._settings.slow_refresh_cycles)
         if cycle_index % every == 0:
@@ -99,8 +103,27 @@ class Poller(QThread):
                 source, "equipment", "fetch_equipment", transform.equipment_to_df)
             stats["adaptmac"] = await self._sync_master(
                 source, "adaptmac", "fetch_adaptmacs", transform.adaptmacs_to_df)
+            stats["tanks"] = await self._sync_master(
+                source, "tanks", "fetch_tanks", transform.tanks_to_df)
             stats["changes"] = await self._sync_changes(source)
         return stats
+
+    async def _sync_reconciliations(self, source) -> int:
+        """Reconciliacion diaria por tanque, incremental por watermark sobre
+        `updated_at` (primer arranque = ultimos `_RECON_INITIAL_DAYS` dias)."""
+        watermark = self._db.get_watermark("reconciliations")
+        if watermark:
+            updated_from = watermark - _WATERMARK_EPSILON
+        else:
+            updated_from = datetime.now() - timedelta(days=_RECON_INITIAL_DAYS)
+        df = transform.reconciliations_to_df(
+            await source.fetch_reconciliations(updated_from))
+        n = self._db.upsert("reconciliations", df)
+        new_wm = self._max_updated(df)
+        if new_wm is not None:
+            self._db.set_watermark(
+                "reconciliations", max(new_wm, watermark) if watermark else new_wm)
+        return n
 
     async def _sync_changes(self, source) -> int:
         """Trae el log de auditoria de equipos/RFID (semi-maestro) de forma

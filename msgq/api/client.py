@@ -203,6 +203,19 @@ class AdaptIQClient:
             queries.ADAPTMACS_QUERY, "adaptMacs",
             {"siteId": site_id, "first": self._settings.page_size})
 
+    async def fetch_tanks(self, updated_from: datetime | None) -> list[dict]:
+        site_id = await self._resolve_site_id()
+        return await self._paginate_site_connection(
+            queries.TANKS_QUERY, "tanks",
+            {"siteId": site_id, "first": self._settings.page_size})
+
+    async def fetch_reconciliations(self, updated_from: datetime | None) -> list[dict]:
+        site_id = await self._resolve_site_id()
+        filt = {"updatedFrom": _iso(updated_from)} if updated_from else {}
+        return await self._paginate_site_connection(
+            queries.RECONCILIATIONS_QUERY, "reconciliations",
+            {"siteId": site_id, "filter": filt, "first": self._settings.page_size})
+
     async def fetch_changes(self, record_type: str,
                             changes_from: datetime | None) -> list[dict]:
         out: list[dict] = []

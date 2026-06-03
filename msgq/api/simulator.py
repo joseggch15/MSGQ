@@ -41,6 +41,28 @@ _PRODUCTS = ["DIESEL", "DIESEL", "DIESEL", "UNLEADED"]
 _DEPARTMENTS = ["Mining", "Maintenance", "Civil", "Logistics"]
 _COST_CENTRES = ["CC-1001", "CC-1002", "CC-2050", "CC-3010"]
 
+# Tanques del sitio (espejo de la estructura real de Merian): el circuito Diesel
+# (Main + Virtual logico + 3 satelites) y el de Gasolina (174-TK-01), mas un
+# tanque de lubricante. (code, description, product, virtual, capacity, parent, type)
+_TANKS_SPEC = [
+    ("LFO - Main Tank",   "LFO - Main Tank",            "Diesel",            False, 1022400.0, None,                 "2in1 - Left"),
+    ("LFO - Virtual Tank","LFO - Virtual Tank",         "Diesel",            True,   149847.0, None,                 "Level - 1 Cylinder"),
+    ("LFO - 171-TK-03",   "LFO - Tank 1 - 171-TK-03",   "Diesel",            False,   49949.0, "LFO - Virtual Tank", "Level - 1 Cylinder"),
+    ("LFO - 171-TK-04",   "LFO - Tank 2 - 171-TK-04",   "Diesel",            False,   49949.0, "LFO - Virtual Tank", "Level - 1 Cylinder"),
+    ("LFO - 171-TK-05",   "LFO - Tank 3 - 171-TK-05",   "Diesel",            False,   49949.0, "LFO - Virtual Tank", "Level - 1 Cylinder"),
+    ("LFO - 174-TK-01",   "LFO - 174-TK-01",            "Unleaded Gasoline", False,    4699.0, None,                 "Level - 1 Cylinder 4K"),
+    ("WS - Tank 6",       "WS - Rimula R4X15W40 - Tank 6", "15W40",          False,   32257.0, None,                 "Level"),
+]
+
+# Tanques con reconciliacion diaria sintetica: (code, desc, product, stock base,
+# inflow medio, outflow medio).
+_RECON_SPEC = [
+    ("LFO - Main Tank",    "LFO - Main Tank",              "Diesel",            760000.0, 120000.0, 130000.0),
+    ("LFO - Virtual Tank", "LFO - Virtual Tank",           "Diesel",             90000.0,   8000.0,   9000.0),
+    ("LFO - 174-TK-01",    "LFO - 174-TK-01",              "Unleaded Gasoline",   3000.0,    300.0,    350.0),
+    ("WS - Tank 6",        "WS - Rimula R4X15W40 - Tank 6","15W40",              18000.0,      0.0,    600.0),
+]
+
 
 def _iso(dt: datetime) -> str:
     return dt.isoformat()
@@ -56,6 +78,8 @@ class SimulatorSource:
         self._fleet = self._build_fleet(roster_rng)   # dicts internos ricos
         self._adaptmacs = self._build_adaptmacs(roster_rng)
         self._change_log = self._build_change_log(roster_rng)
+        self._tanks = self._build_tanks()
+        self._reconciliations = self._build_reconciliations(roster_rng)
         self._seq = 0
         self._equipment_sent = False
 
@@ -103,6 +127,20 @@ class SimulatorSource:
         nodes = await self.fetch_changes(record_type, changes_from)
         for i in range(0, len(nodes), 200):   # emula paginacion para el progreso
             on_page(nodes[i:i + 200])
+
+    async def fetch_tanks(self, updated_from: datetime | None) -> list[dict]:
+        return list(self._tanks)
+
+    async def fetch_reconciliations(self, updated_from: datetime | None) -> list[dict]:
+        floor = self._naive(updated_from) if updated_from is not None else None
+        if floor is None:
+            return list(self._reconciliations)
+        out = []
+        for r in self._reconciliations:
+            ts = self._parse(r["recordUpdatedAt"])
+            if ts is None or ts >= floor:
+                out.append(r)
+        return out
 
     async def aclose(self) -> None:
         return None
@@ -271,6 +309,57 @@ class SimulatorSource:
     @staticmethod
     def _naive(dt: datetime) -> datetime:
         return dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) else dt
+
+    def _build_tanks(self) -> list[dict]:
+        """Nodos de tanque en forma GraphQL (id/code/virtual/parentTank/...)."""
+        nodes = []
+        for i, (code, desc, prod, virtual, cap, parent, ttype) in enumerate(_TANKS_SPEC, start=1):
+            nodes.append({
+                "id": str(i), "code": code, "description": desc, "name": desc,
+                "virtual": virtual, "enabled": True, "capacity": f"{cap:.2f}",
+                "volumeUnit": "L",
+                "product": {"code": prod[:4].upper(), "description": prod},
+                "parentTank": {"code": parent} if parent else None,
+                "tankType": {"description": ttype},
+            })
+        return nodes
+
+    def _build_reconciliations(self, rng: random.Random) -> list[dict]:
+        """Reconciliacion diaria sintetica (45 dias) por tanque de combustible.
+
+        `volume` = error de reconciliacion = (closing-opening) - (inflow-outflow),
+        que aqui es el 'ruido' del sensor (pequena discrepancia ~1%)."""
+        recs: list[dict] = []
+        rid = 1000
+        today = datetime.now().replace(hour=23, minute=59, second=0, microsecond=0)
+        for code, desc, prod, base, in_avg, out_avg in _RECON_SPEC:
+            opening = base
+            for d in range(45, 0, -1):
+                period_end = today - timedelta(days=d - 1)
+                period_start = period_end - timedelta(days=1)
+                inflow = round(rng.uniform(0.7, 1.3) * in_avg, 2) if (in_avg and rng.random() < 0.5) else 0.0
+                outflow = round(rng.uniform(0.7, 1.3) * out_avg, 2)
+                noise = round(rng.uniform(-0.012, 0.012) * (base or 1.0), 2)
+                closing = round(opening + inflow - outflow + noise, 2)
+                error = round((closing - opening) - (inflow - outflow), 2)
+                recs.append({
+                    "id": str(rid),
+                    "periodStart": _iso(period_start),
+                    "periodEnd": _iso(period_end),
+                    "openingStock": f"{opening:.2f}",
+                    "closingStock": f"{closing:.2f}",
+                    "inflowVolume": f"{inflow:.2f}",
+                    "outflowVolume": f"{outflow:.2f}",
+                    "volume": f"{error:.2f}",
+                    "status": rng.choices(["all_ok", "unconfirmed", "pending"],
+                                          weights=[85, 10, 5])[0],
+                    "recordUpdatedAt": _iso(period_end + timedelta(hours=1)),
+                    "target": {"code": code, "description": desc},
+                    "product": {"code": prod[:4].upper(), "description": prod},
+                })
+                rid += 1
+                opening = closing
+        return recs
 
     def _make_movement(self) -> dict:
         rng = self._rng
