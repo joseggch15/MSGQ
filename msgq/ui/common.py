@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QSortFilterProxyModel
-from PySide6.QtWidgets import QLabel, QTableView, QVBoxLayout, QLineEdit, QWidget
+from PySide6.QtWidgets import (
+    QComboBox, QHBoxLayout, QLabel, QLineEdit, QTableView, QVBoxLayout, QWidget,
+)
 
+from msgq.i18n import LANGUAGES, current_language, t
 from msgq.ui.table_model import SORT_ROLE, DataFrameModel
 
 
@@ -28,7 +31,7 @@ def wrap_with_search(table: QTableView) -> QWidget:
     lay = QVBoxLayout(container)
     lay.setContentsMargins(2, 2, 2, 2)
     box = QLineEdit()
-    box.setPlaceholderText("Filtrar por cualquier texto...")
+    box.setPlaceholderText(t("Filtrar por cualquier texto..."))
 
     def _filter(text: str):
         proxy = table.model()
@@ -58,3 +61,23 @@ def warn_label(title: str, value: str, warn: bool = False) -> QLabel:
     """Tarjeta KPI con color condicional: rojo si hay anomalias, verde si no."""
     color = "#C62828" if warn else "#2E7D32"
     return kpi_label(title, value, color)
+
+
+def language_selector(on_change) -> QWidget:
+    """Selector de idioma (🌐 + combo) reutilizable. `on_change(code)` recibe el
+    código del idioma elegido ('es'/'en'). El idioma actual queda preseleccionado
+    sin disparar la señal (se conecta después de fijar el índice)."""
+    w = QWidget()
+    lay = QHBoxLayout(w)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(4)
+    lay.addWidget(QLabel("🌐"))
+    combo = QComboBox()
+    for code, name in LANGUAGES:
+        combo.addItem(name, code)
+    ix = next((i for i, (c, _) in enumerate(LANGUAGES) if c == current_language()), 0)
+    combo.setCurrentIndex(ix)
+    combo.currentIndexChanged.connect(lambda i: on_change(combo.itemData(i)))
+    combo.setMaximumWidth(120)
+    lay.addWidget(combo)
+    return w

@@ -9,6 +9,10 @@ Dashboard de escritorio que:
   • Proyecta KPIs, movimientos, equipos, consolas AdaptMAC y un panel de alertas
     de trazabilidad (bypass, despacho a equipo no operativo, contaminacion...).
 
+El idioma (ES/EN) se elige con el selector de la barra superior y se recuerda
+entre sesiones (QSettings). El cambio reconstruye la interfaz para que TODO —
+chrome, tablas, gráficas y exports— quede en el idioma elegido.
+
 Ejecutar:  python run.py
 """
 from __future__ import annotations
@@ -16,19 +20,20 @@ from __future__ import annotations
 import os
 import traceback
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QFrame, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QSpinBox,
-    QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
+    QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from msgq.config import Settings, load_embedded_settings
 from msgq.core import alerts as al
+from msgq.i18n import LANGUAGES, current_language, set_language, t, tr_fmt
 from msgq.ingest import Poller
 from msgq.io import load_equipment_csv
 from msgq.storage import Database
-from msgq.ui.common import kpi_label, make_table, warn_label, wrap_with_search
+from msgq.ui.common import kpi_label, language_selector, make_table, warn_label, wrap_with_search
 
 PRIMARY = "#1F4E78"
 ACCENT = "#2E7D32"
@@ -79,7 +84,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MSGQ — Monitor FMS AdaptIQ  ·  Newmont Merian")
+        self._qsettings = QSettings("NewmontMerian", "MSGQ")
+        set_language(self._qsettings.value("language", "es"))
         self.resize(1480, 880)
         self.setMinimumSize(1100, 700)
         self.setStyleSheet(STYLESHEET)
@@ -91,71 +97,108 @@ class MainWindow(QMainWindow):
         self._settings = embedded if embedded is not None else Settings.from_env()
         self._db = Database(self._settings.db_path)
         self._poller: Poller | None = None
+        self._monitoring = False
+        self._eq_window = None
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(_REFRESH_MS)
         self._refresh_timer.timeout.connect(self._refresh_views)
 
-        root = QWidget()
-        self.setCentralWidget(root)
-        lay = QVBoxLayout(root)
-        lay.setSpacing(6)
-        lay.addWidget(self._build_kiosk_banner() if self._kiosk else self._build_connection())
-        lay.addWidget(self._build_kpi_strip())
-        lay.addWidget(self._build_tabs(), stretch=1)
+        self.setWindowTitle(t("MSGQ — Monitor FMS AdaptIQ  ·  Newmont Merian"))
+        self._build_central()
 
         self._refresh_views()  # muestra lo que ya hubiera en la replica
         if self._kiosk:
-            self.statusBar().showMessage("Conectando y cargando datos en tiempo real…")
+            self.statusBar().showMessage(t("Conectando y cargando datos en tiempo real…"))
             QTimer.singleShot(250, self._start_monitoring)
         else:
-            self.statusBar().showMessage("Listo. Configura la conexion y pulsa «Iniciar monitoreo».")
+            self.statusBar().showMessage(
+                t("Listo. Configura la conexion y pulsa «Iniciar monitoreo»."))
+
+    # =======================================================================
+    # Idioma
+    # =======================================================================
+
+    def switch_language(self, code: str) -> None:
+        """Cambia el idioma global, lo recuerda y reconstruye esta ventana (y la
+        de análisis si está abierta)."""
+        if not code or code == current_language():
+            return
+        set_language(code)
+        self._qsettings.setValue("language", code)
+        self._apply_language()
+        eqw = self._eq_window
+        if eqw is not None and eqw.isVisible():
+            eqw.apply_external_language()
+
+    def _on_language_changed(self, code: str) -> None:
+        self.switch_language(code)
+
+    def _apply_language(self) -> None:
+        self.setWindowTitle(t("MSGQ — Monitor FMS AdaptIQ  ·  Newmont Merian"))
+        self._build_central()
+        if not self._kiosk:
+            self.btn_start.setEnabled(not self._monitoring)
+            self.btn_stop.setEnabled(self._monitoring)
+            self._set_inputs_enabled(not self._monitoring)
+        self._last_counts = None
+        self._refresh_views(force=True)
 
     # =======================================================================
     # Construccion de la interfaz
     # =======================================================================
 
+    def _build_central(self) -> None:
+        root = QWidget()
+        lay = QVBoxLayout(root)
+        lay.setSpacing(6)
+        lay.addWidget(self._build_kiosk_banner() if self._kiosk else self._build_connection())
+        lay.addWidget(self._build_kpi_strip())
+        lay.addWidget(self._build_tabs(), stretch=1)
+        self.setCentralWidget(root)
+
     def _build_connection(self) -> QGroupBox:
-        box = QGroupBox("Conexion y motor de polling")
+        box = QGroupBox(t("Conexion y motor de polling"))
         col = QVBoxLayout(box)
 
         r1 = QHBoxLayout()
-        r1.addWidget(QLabel("Endpoint GraphQL:"))
+        r1.addWidget(QLabel(t("Endpoint GraphQL:")))
         self.ed_endpoint = QLineEdit(self._settings.endpoint)
         r1.addWidget(self.ed_endpoint, stretch=2)
-        r1.addWidget(QLabel("Token:"))
+        r1.addWidget(QLabel(t("Token:")))
         self.ed_token = QLineEdit(self._settings.token)
         self.ed_token.setEchoMode(QLineEdit.Password)
         self.ed_token.setPlaceholderText("Authorization: Token token=<...>")
         r1.addWidget(self.ed_token, stretch=1)
+        r1.addWidget(language_selector(self._on_language_changed))
         col.addLayout(r1)
 
         r2 = QHBoxLayout()
-        r2.addWidget(QLabel("Intervalo (s):"))
+        r2.addWidget(QLabel(t("Intervalo (s):")))
         self.spin_poll = QSpinBox()
         self.spin_poll.setRange(3, 600)
         self.spin_poll.setValue(self._settings.poll_seconds)
         r2.addWidget(self.spin_poll)
         r2.addSpacing(16)
-        r2.addWidget(QLabel("Site:"))
+        r2.addWidget(QLabel(t("Site:")))
         self.ed_site = QLineEdit(self._settings.site_id or self._settings.site_match)
         self.ed_site.setMaximumWidth(150)
-        self.ed_site.setToolTip(
+        self.ed_site.setToolTip(t(
             "ID del sitio, o un texto del nombre (p. ej. 'Merian') para "
-            "auto-descubrirlo via la query 'sites'.")
+            "auto-descubrirlo via la query 'sites'."))
         r2.addWidget(self.ed_site)
         r2.addSpacing(16)
-        self.chk_demo = QCheckBox("Modo demo (simulador, sin red)")
+        self.chk_demo = QCheckBox(t("Modo demo (simulador, sin red)"))
         self.chk_demo.setChecked(self._settings.demo_mode)
         r2.addWidget(self.chk_demo)
         r2.addStretch(1)
 
-        self.btn_start = QPushButton("Iniciar monitoreo")
+        self.btn_start = QPushButton(t("Iniciar monitoreo"))
         self.btn_start.setObjectName("accent")
         self.btn_start.clicked.connect(self._on_start)
         r2.addWidget(self.btn_start)
 
-        self.btn_stop = QPushButton("Detener")
+        self.btn_stop = QPushButton(t("Detener"))
         self.btn_stop.setObjectName("danger")
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._on_stop)
@@ -164,19 +207,19 @@ class MainWindow(QMainWindow):
 
         # Fila 3 — carga de snapshots locales (sin token ni red).
         r3 = QHBoxLayout()
-        self.btn_import_eq = QPushButton("Importar equipos (CSV de AdaptIQ)…")
+        self.btn_import_eq = QPushButton(t("Importar equipos (CSV de AdaptIQ)…"))
         self.btn_import_eq.clicked.connect(self._on_import_equipment)
         r3.addWidget(self.btn_import_eq)
-        hint = QLabel("Carga el maestro completo de equipos desde un export CSV "
-                      "(no requiere token ni red).")
+        hint = QLabel(t("Carga el maestro completo de equipos desde un export CSV "
+                        "(no requiere token ni red)."))
         hint.setStyleSheet("color:#5A6B7B;")
         r3.addWidget(hint)
         r3.addStretch(1)
-        self.btn_analyze = QPushButton("Analizar equipos…")
+        self.btn_analyze = QPushButton(t("Analizar equipos…"))
         self.btn_analyze.setObjectName("accent")
-        self.btn_analyze.setToolTip(
+        self.btn_analyze.setToolTip(t(
             "Abre el análisis de flota: filtros, frecuencia de cambio de RFID, "
-            "transiciones In↔Out, auditoría y gráficas.")
+            "transiciones In↔Out, auditoría y gráficas."))
         self.btn_analyze.clicked.connect(self._on_open_equipment)
         r3.addWidget(self.btn_analyze)
         col.addLayout(r3)
@@ -188,27 +231,28 @@ class MainWindow(QMainWindow):
             from msgq.ui.equipment_window import EquipmentWindow
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
-                self, "Falta pyqtgraph",
-                f"No se pudo abrir el análisis de equipos:\n{exc}\n\n"
-                "Instala la dependencia: pip install pyqtgraph")
+                self, t("Falta pyqtgraph"),
+                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
+                f"{t('Instala la dependencia: pip install pyqtgraph')}")
             return
         self._eq_window = EquipmentWindow(self._db, self)
         self._eq_window.show()
 
     def _build_kiosk_banner(self) -> QGroupBox:
         """Banner de la version turnkey (sin token por pantalla) + acceso al análisis."""
-        box = QGroupBox("Monitoreo en tiempo real")
+        box = QGroupBox(t("Monitoreo en tiempo real"))
         row = QHBoxLayout(box)
-        live = QLabel("●  EN VIVO")
+        live = QLabel(f"●  {t('EN VIVO')}")
         live.setStyleSheet("color:#2E7D32; font-weight:bold;")
         row.addWidget(live)
         site = self._settings.site_id or self._settings.site_match
-        info = QLabel(f"{self._settings.endpoint}    ·    Site: {site}    ·    "
-                      f"actualiza cada {self._settings.poll_seconds}s")
+        info = QLabel(f"{self._settings.endpoint}    ·    {t('Site:')} {site}    ·    "
+                      f"{t('actualiza cada')} {self._settings.poll_seconds}s")
         info.setStyleSheet("color:#5A6B7B;")
         row.addWidget(info)
         row.addStretch(1)
-        self.btn_analyze = QPushButton("Analizar equipos…")
+        row.addWidget(language_selector(self._on_language_changed))
+        self.btn_analyze = QPushButton(t("Analizar equipos…"))
         self.btn_analyze.setObjectName("accent")
         self.btn_analyze.clicked.connect(self._on_open_equipment)
         row.addWidget(self.btn_analyze)
@@ -220,7 +264,7 @@ class MainWindow(QMainWindow):
         frame.setStyleSheet("QFrame{background:#EDF1F6; border-radius:6px;}")
         self._kpi_layout = QHBoxLayout(frame)
         self._kpi_layout.setContentsMargins(8, 6, 8, 6)
-        self._kpi_layout.addWidget(QLabel("Sin datos todavia."))
+        self._kpi_layout.addWidget(QLabel(t("Sin datos todavia.")))
         self._kpi_layout.addStretch(1)
         return frame
 
@@ -228,15 +272,15 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
 
         self.tbl_mov, self.m_mov = make_table()
-        self.tabs.addTab(wrap_with_search(self.tbl_mov), "Movimientos")
+        self.tabs.addTab(wrap_with_search(self.tbl_mov), t("Movimientos"))
 
         self.tbl_eq, self.m_eq = make_table()
-        self.tabs.addTab(wrap_with_search(self.tbl_eq), "Equipos")
+        self.tabs.addTab(wrap_with_search(self.tbl_eq), t("Equipos"))
 
         self.tbl_mac, self.m_mac = make_table()
-        self.tabs.addTab(wrap_with_search(self.tbl_mac), "Consolas AdaptMAC")
+        self.tabs.addTab(wrap_with_search(self.tbl_mac), t("Consolas AdaptMAC"))
 
-        self.tabs.addTab(self._build_alerts_tab(), "Alertas")
+        self.tabs.addTab(self._build_alerts_tab(), t("Alertas"))
         return self.tabs
 
     def _build_alerts_tab(self) -> QWidget:
@@ -246,10 +290,10 @@ class MainWindow(QMainWindow):
         inner = QTabWidget()
 
         self.tbl_alerts, self.m_alerts = make_table()
-        inner.addTab(wrap_with_search(self.tbl_alerts), "Todas")
+        inner.addTab(wrap_with_search(self.tbl_alerts), t("Todas"))
 
         self.tbl_alert_sum, self.m_alert_sum = make_table()
-        inner.addTab(self.tbl_alert_sum, "Resumen ejecutivo")
+        inner.addTab(self.tbl_alert_sum, t("Resumen ejecutivo"))
 
         lay.addWidget(inner)
         return c
@@ -263,9 +307,9 @@ class MainWindow(QMainWindow):
         token = self.ed_token.text().strip()
         if not demo and not token:
             QMessageBox.warning(
-                self, "Falta token",
-                "Para conectar a la API real necesitas un token, o activa el "
-                "modo demo (simulador).")
+                self, t("Falta token"),
+                t("Para conectar a la API real necesitas un token, o activa el "
+                  "modo demo (simulador)."))
             return
 
         self._settings.endpoint = self.ed_endpoint.text().strip()
@@ -290,6 +334,7 @@ class MainWindow(QMainWindow):
         self._poller.failed.connect(self._on_failed)
         self._poller.start()
         self._refresh_timer.start()
+        self._monitoring = True
         if not self._kiosk:
             self.btn_start.setEnabled(False)
             self.btn_stop.setEnabled(True)
@@ -298,10 +343,11 @@ class MainWindow(QMainWindow):
     def _on_stop(self):
         self._stop_poller()
         self._refresh_timer.stop()
+        self._monitoring = False
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self._set_inputs_enabled(True)
-        self.statusBar().showMessage("Monitoreo detenido.")
+        self.statusBar().showMessage(t("Monitoreo detenido."))
 
     def _stop_poller(self):
         if self._poller is not None:
@@ -320,23 +366,21 @@ class MainWindow(QMainWindow):
 
     def _on_import_equipment(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Importar CSV de equipos de AdaptIQ", "",
-            "CSV (*.csv);;Todos (*.*)")
+            self, t("Importar CSV de equipos de AdaptIQ"), "",
+            t("CSV (*.csv);;Todos (*.*)"))
         if not path:
             return
         try:
             df = load_equipment_csv(path)
             n = self._db.upsert("equipment", df)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Error al importar",
+            QMessageBox.critical(self, t("Error al importar"),
                                  f"{exc}\n\n{traceback.format_exc()}")
             return
         self._refresh_views()
         QMessageBox.information(
-            self, "Equipos importados",
-            f"Se cargaron {n:,} equipos desde:\n{os.path.basename(path)}\n\n"
-            "Sugerencia: deja el «Modo demo» apagado para que el simulador no "
-            "sobrescriba estos registros.")
+            self, t("Equipos importados"),
+            tr_fmt("import.success", n=n, file=os.path.basename(path)))
 
     # =======================================================================
     # Señales del poller
@@ -347,7 +391,7 @@ class MainWindow(QMainWindow):
         self._refresh_views(force=True)
 
     def _on_failed(self, message: str):
-        self.statusBar().showMessage(f"⚠ Error de sincronizacion: {message}")
+        self.statusBar().showMessage(f"⚠ {t('Error de sincronizacion')}: {message}")
 
     # =======================================================================
     # Refresco de vistas (lee de la replica SQLite)
@@ -371,7 +415,7 @@ class MainWindow(QMainWindow):
             mac = self._db.get_adaptmac()
             recent = self._db.recent_movements(hours=24)
         except Exception as exc:  # noqa: BLE001
-            self.statusBar().showMessage(f"Error leyendo la replica: {exc}")
+            self.statusBar().showMessage(f"{t('Error leyendo la replica')}: {exc}")
             return
 
         self.m_mov.set_dataframe(mv)
@@ -395,13 +439,13 @@ class MainWindow(QMainWindow):
                 it.widget().deleteLater()
 
         cards = [
-            kpi_label("Movimientos (24h)", f"{k['movimientos']:,}", PRIMARY),
-            kpi_label("Volumen 24h (L)", f"{k['volumen_total']:,.0f}", PRIMARY),
-            warn_label("Alertas criticas", f"{k['criticas']:,}", warn=k["criticas"] > 0),
-            warn_label("Advertencias", f"{k['advertencias']:,}", warn=k["advertencias"] > 0),
-            kpi_label("Equipos In Service", f"{k['equipos_in_service']:,}", ACCENT),
-            warn_label("Out of Service", f"{k['equipos_out_service']:,}", warn=k["equipos_out_service"] > 0),
-            kpi_label("Consolas online", f"{k['consolas_online']}/{k['consolas_total']}",
+            kpi_label(t("Movimientos (24h)"), f"{k['movimientos']:,}", PRIMARY),
+            kpi_label(t("Volumen 24h (L)"), f"{k['volumen_total']:,.0f}", PRIMARY),
+            warn_label(t("Alertas criticas"), f"{k['criticas']:,}", warn=k["criticas"] > 0),
+            warn_label(t("Advertencias"), f"{k['advertencias']:,}", warn=k["advertencias"] > 0),
+            kpi_label(t("Equipos In Service"), f"{k['equipos_in_service']:,}", ACCENT),
+            warn_label(t("Out of Service"), f"{k['equipos_out_service']:,}", warn=k["equipos_out_service"] > 0),
+            kpi_label(t("Consolas online"), f"{k['consolas_online']}/{k['consolas_total']}",
                       ACCENT if k["consolas_online"] == k["consolas_total"] else DANGER),
         ]
         for c in cards:
@@ -425,6 +469,8 @@ class MainWindow(QMainWindow):
 def launch() -> int:
     app = QApplication.instance() or QApplication([])
     app.setStyle("Fusion")
+    app.setOrganizationName("NewmontMerian")
+    app.setApplicationName("MSGQ")
     try:
         window = MainWindow()
     except Exception:  # noqa: BLE001

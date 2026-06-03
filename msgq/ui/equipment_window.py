@@ -11,6 +11,9 @@ Lee de la réplica SQLite (sin tocar el poller) y ofrece:
         más actividad.
       - Atributos que más se modifican y auditoría por usuario.
   • Gráficas (pyqtgraph) y exportación a Excel.
+
+El idioma (ES/EN) se comparte con la ventana principal; el selector de la barra
+de filtros lo cambia y reconstruye la interfaz (chrome, tablas, gráficas, export).
 """
 from __future__ import annotations
 
@@ -18,7 +21,7 @@ import traceback
 from datetime import datetime
 
 import pandas as pd
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
@@ -28,12 +31,13 @@ from PySide6.QtWidgets import (
 from msgq import config
 from msgq.core import equipment_analytics as ea
 from msgq.export import export_sheets
+from msgq.i18n import current_language, set_language, t, tr_fmt, tr_value
 from msgq.storage import Database
 from msgq.ui.charts import BarChart, TimeSeriesChart
-from msgq.ui.common import kpi_label, make_table, warn_label, wrap_with_search
+from msgq.ui.common import (
+    kpi_label, language_selector, make_table, warn_label, wrap_with_search,
+)
 
-_STATUS_OPTIONS = ["Todos", config.STATUS_IN, config.STATUS_OUT, config.STATUS_DECOM]
-_TYPE_OPTIONS = ["Todos", "Propios", "Contratistas"]
 _INVENTORY_COLS = [
     "equipment_id", "description", "status", "group", "category", "make",
     "model", "department", "cost_centre", "is_light_vehicle",
@@ -57,10 +61,10 @@ class AuditLogDialog(QDialog):
         view, model = make_table()
         model.set_dataframe(log_df)
         lay.addWidget(view)
-        msg = (f"{len(log_df):,} cambios registrados en la réplica."
+        msg = (f"{len(log_df):,} {t('cambios registrados en la réplica.')}"
                if log_df is not None and not log_df.empty
-               else "Sin cambios de este equipo en la réplica todavía "
-                    "(el log se llena al sincronizar).")
+               else t("Sin cambios de este equipo en la réplica todavía "
+                      "(el log se llena al sincronizar)."))
         lay.addWidget(QLabel(msg))
 
 
@@ -70,21 +74,17 @@ class EquipmentWindow(QMainWindow):
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
         self._db = db
+        self._main = parent
+        self._qsettings = QSettings("NewmontMerian", "MSGQ")
         self._eq_all = pd.DataFrame()
         self._changes = pd.DataFrame()
         self._trans = pd.DataFrame()
         self._rfid_sum = ea.rfid_change_summary(pd.DataFrame())
         self._last_counts = None
-        self.setWindowTitle("MSGQ — Análisis de Equipos  ·  Newmont Merian")
+        self.setWindowTitle(t("MSGQ — Análisis de Equipos  ·  Newmont Merian"))
         self.resize(1420, 880)
 
-        root = QWidget()
-        self.setCentralWidget(root)
-        lay = QVBoxLayout(root)
-        lay.setSpacing(6)
-        lay.addWidget(self._build_controls())
-        lay.addWidget(self._build_kpis())
-        lay.addWidget(self._build_tabs(), stretch=1)
+        self._build_central()
         self._refresh()
 
         # Auto-refresco: recoge los datos a medida que el poller los sincroniza.
@@ -97,34 +97,80 @@ class EquipmentWindow(QMainWindow):
         self._timer.stop()
         event.accept()
 
-    # --- Controles ----------------------------------------------------------
+    # --- Idioma -------------------------------------------------------------
+
+    def _on_language_changed(self, code: str) -> None:
+        if not code or code == current_language():
+            return
+        # La ventana principal es la fuente única: actualiza ambas ventanas.
+        if self._main is not None and hasattr(self._main, "switch_language"):
+            self._main.switch_language(code)
+        else:
+            set_language(code)
+            self._qsettings.setValue("language", code)
+            self.apply_external_language()
+
+    def apply_external_language(self) -> None:
+        """Reconstruye esta ventana en el idioma global actual (lo invoca la
+        ventana principal al cambiar el idioma)."""
+        self.setWindowTitle(t("MSGQ — Análisis de Equipos  ·  Newmont Merian"))
+        self._build_central()
+        self._refresh()
+
+    # --- Construcción -------------------------------------------------------
+
+    def _build_central(self) -> None:
+        root = QWidget()
+        lay = QVBoxLayout(root)
+        lay.setSpacing(6)
+        lay.addWidget(self._build_controls())
+        lay.addWidget(self._build_kpis())
+        lay.addWidget(self._build_tabs(), stretch=1)
+        self.setCentralWidget(root)
 
     def _build_controls(self) -> QGroupBox:
-        box = QGroupBox("Filtros")
+        box = QGroupBox(t("Filtros"))
         row = QHBoxLayout(box)
         # Los filtros usan _apply_filters (rapido); no recalculan la analitica temporal.
-        self.cmb_status = QComboBox(); self.cmb_status.addItems(_STATUS_OPTIONS)
-        self.cmb_status.currentIndexChanged.connect(self._apply_filters)
-        self.cmb_type = QComboBox(); self.cmb_type.addItems(_TYPE_OPTIONS)
-        self.cmb_type.currentIndexChanged.connect(self._apply_filters)
+        # Cada combo guarda el VALOR canónico en userData; el texto visible se
+        # traduce. Así filtrar no depende del idioma de la etiqueta.
         eq = self._db.get_equipment()
-        self.cmb_category = QComboBox(); self.cmb_category.addItem("Todas")
-        self.cmb_category.addItems(_distinct(eq, "category"))
-        self.cmb_category.currentIndexChanged.connect(self._apply_filters)
-        self.cmb_group = QComboBox(); self.cmb_group.addItem("Todos")
-        self.cmb_group.addItems(_distinct(eq, "group"))
-        self.cmb_group.currentIndexChanged.connect(self._apply_filters)
-        self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("Buscar por ID, descripción, marca, modelo...")
-        self.txt_search.textChanged.connect(self._apply_filters)
-        btn_refresh = QPushButton("Actualizar"); btn_refresh.clicked.connect(self._refresh)
-        btn_export = QPushButton("Exportar a Excel…"); btn_export.clicked.connect(self._on_export)
+        self.cmb_status = QComboBox()
+        self.cmb_status.addItem(t("Todos"), None)
+        for st in (config.STATUS_IN, config.STATUS_OUT, config.STATUS_DECOM):
+            self.cmb_status.addItem(st, st)   # estados FMS: texto original
+        self.cmb_status.currentIndexChanged.connect(self._apply_filters)
 
-        for label, w in (("Estado:", self.cmb_status), ("Tipo:", self.cmb_type),
-                         ("Categoría:", self.cmb_category), ("Grupo:", self.cmb_group)):
+        self.cmb_type = QComboBox()
+        self.cmb_type.addItem(t("Todos"), None)
+        self.cmb_type.addItem(t("Propios"), "own")
+        self.cmb_type.addItem(t("Contratistas"), "contractor")
+        self.cmb_type.currentIndexChanged.connect(self._apply_filters)
+
+        self.cmb_category = QComboBox()
+        self.cmb_category.addItem(t("Todas"), None)
+        for v in _distinct(eq, "category"):
+            self.cmb_category.addItem(v, v)
+        self.cmb_category.currentIndexChanged.connect(self._apply_filters)
+
+        self.cmb_group = QComboBox()
+        self.cmb_group.addItem(t("Todos"), None)
+        for v in _distinct(eq, "group"):
+            self.cmb_group.addItem(v, v)
+        self.cmb_group.currentIndexChanged.connect(self._apply_filters)
+
+        self.txt_search = QLineEdit()
+        self.txt_search.setPlaceholderText(t("Buscar por ID, descripción, marca, modelo..."))
+        self.txt_search.textChanged.connect(self._apply_filters)
+        btn_refresh = QPushButton(t("Actualizar")); btn_refresh.clicked.connect(self._refresh)
+        btn_export = QPushButton(t("Exportar a Excel…")); btn_export.clicked.connect(self._on_export)
+
+        for label, w in ((t("Estado:"), self.cmb_status), (t("Tipo:"), self.cmb_type),
+                         (t("Categoría:"), self.cmb_category), (t("Grupo:"), self.cmb_group)):
             row.addWidget(QLabel(label)); row.addWidget(w)
-        row.addWidget(QLabel("Buscar:")); row.addWidget(self.txt_search, stretch=1)
+        row.addWidget(QLabel(t("Buscar:"))); row.addWidget(self.txt_search, stretch=1)
         row.addWidget(btn_refresh); row.addWidget(btn_export)
+        row.addWidget(language_selector(self._on_language_changed))
         return box
 
     def _build_kpis(self) -> QFrame:
@@ -139,31 +185,31 @@ class EquipmentWindow(QMainWindow):
 
         # Inventario (con doble clic -> audit log)
         inv = QWidget(); ilay = QVBoxLayout(inv); ilay.setContentsMargins(2, 2, 2, 2)
-        ilay.addWidget(QLabel("Doble clic en un equipo para ver su <b>Audit Log</b> completo."))
+        ilay.addWidget(QLabel(t("Doble clic en un equipo para ver su <b>Audit Log</b> completo.")))
         self.tbl_inv, self.m_inv = make_table()
         self.tbl_inv.doubleClicked.connect(self._on_inv_double_clicked)
         ilay.addWidget(self.tbl_inv)
-        self.tabs.addTab(inv, "Inventario")
+        self.tabs.addTab(inv, t("Inventario"))
 
         # Agrupaciones
         agg = QTabWidget()
-        self.tbl_cat, self.m_cat = make_table(); agg.addTab(self.tbl_cat, "Categoría")
-        self.tbl_grp, self.m_grp = make_table(); agg.addTab(self.tbl_grp, "Grupo")
-        self.tbl_dep, self.m_dep = make_table(); agg.addTab(self.tbl_dep, "Departamento")
-        self.tbl_mk, self.m_mk = make_table(); agg.addTab(self.tbl_mk, "Marca")
-        self.tabs.addTab(agg, "Agrupaciones")
+        self.tbl_cat, self.m_cat = make_table(); agg.addTab(self.tbl_cat, t("Categoría"))
+        self.tbl_grp, self.m_grp = make_table(); agg.addTab(self.tbl_grp, t("Grupo"))
+        self.tbl_dep, self.m_dep = make_table(); agg.addTab(self.tbl_dep, t("Departamento"))
+        self.tbl_mk, self.m_mk = make_table(); agg.addTab(self.tbl_mk, t("Marca"))
+        self.tabs.addTab(agg, t("Agrupaciones"))
 
-        self.tabs.addTab(self._build_rfid_tab(), "Cambios de RFID")
-        self.tabs.addTab(self._build_status_tab(), "Transiciones de estado")
-        self.tabs.addTab(self._build_costcentre_tab(), "Cost center")
+        self.tabs.addTab(self._build_rfid_tab(), t("Cambios de RFID"))
+        self.tabs.addTab(self._build_status_tab(), t("Transiciones de estado"))
+        self.tabs.addTab(self._build_costcentre_tab(), t("Cost center"))
 
         self.tbl_attr, self.m_attr = make_table()
-        self.tabs.addTab(self.tbl_attr, "Atributos")
+        self.tabs.addTab(self.tbl_attr, t("Atributos"))
         self.tbl_audit, self.m_audit = make_table()
-        self.tabs.addTab(self.tbl_audit, "Auditoría (quién)")
+        self.tabs.addTab(self.tbl_audit, t("Auditoría (quién)"))
         self.tbl_comp, self.m_comp = make_table()
-        self.tabs.addTab(self.tbl_comp, "Calidad de datos")
-        self.tabs.addTab(self._build_charts_tab(), "Gráficas")
+        self.tabs.addTab(self.tbl_comp, t("Calidad de datos"))
+        self.tabs.addTab(self._build_charts_tab(), t("Gráficas"))
         return self.tabs
 
     def _build_rfid_tab(self) -> QWidget:
@@ -171,8 +217,8 @@ class EquipmentWindow(QMainWindow):
         self.lbl_rfid = QLabel(); self.lbl_rfid.setStyleSheet("font-weight:bold; color:#1F4E78;")
         lay.addWidget(self.lbl_rfid)
         split = QSplitter(Qt.Vertical)
-        for title, attr in (("Eventos de RFID por mes (asignado / cambiado / removido)", "tbl_rfid_time"),
-                            ("Tags con más cambios (re-tagueo)", "tbl_rfid_churn")):
+        for title, attr in ((t("Eventos de RFID por mes (asignado / cambiado / removido)"), "tbl_rfid_time"),
+                            (t("Tags con más cambios (re-tagueo)"), "tbl_rfid_churn")):
             w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(0, 0, 0, 0)
             l.addWidget(QLabel(title))
             table, model = make_table(); setattr(self, attr, table)
@@ -185,19 +231,19 @@ class EquipmentWindow(QMainWindow):
         c = QWidget(); lay = QVBoxLayout(c)
         inner = QTabWidget()
         self.tbl_trans, self.m_trans = make_table()
-        inner.addTab(wrap_with_search(self.tbl_trans), "Transiciones")
+        inner.addTab(wrap_with_search(self.tbl_trans), t("Transiciones"))
         self.tbl_trans_sum, self.m_trans_sum = make_table()
-        inner.addTab(self.tbl_trans_sum, "Resumen")
+        inner.addTab(self.tbl_trans_sum, t("Resumen"))
         self.tbl_top_oi, self.m_top_oi = make_table()
-        inner.addTab(wrap_with_search(self.tbl_top_oi), "Top Out→In")
+        inner.addTab(wrap_with_search(self.tbl_top_oi), t("Top Out→In"))
         self.tbl_top_io, self.m_top_io = make_table()
-        inner.addTab(wrap_with_search(self.tbl_top_io), "Top In→Out")
+        inner.addTab(wrap_with_search(self.tbl_top_io), t("Top In→Out"))
         self.tbl_by_grp, self.m_by_grp = make_table()
-        inner.addTab(self.tbl_by_grp, "Por grupo")
+        inner.addTab(self.tbl_by_grp, t("Por grupo"))
         self.tbl_by_cc, self.m_by_cc = make_table()
-        inner.addTab(self.tbl_by_cc, "Por cost centre")
+        inner.addTab(self.tbl_by_cc, t("Por cost centre"))
         self.tbl_tis, self.m_tis = make_table()
-        inner.addTab(wrap_with_search(self.tbl_tis), "Tiempo en servicio")
+        inner.addTab(wrap_with_search(self.tbl_tis), t("Tiempo en servicio"))
         lay.addWidget(inner)
         return c
 
@@ -205,11 +251,11 @@ class EquipmentWindow(QMainWindow):
         c = QWidget(); lay = QVBoxLayout(c)
         split = QSplitter(Qt.Vertical)
         w1 = QWidget(); l1 = QVBoxLayout(w1); l1.setContentsMargins(0, 0, 0, 0)
-        l1.addWidget(QLabel("Equipos que más cambian de cost centre"))
+        l1.addWidget(QLabel(t("Equipos que más cambian de cost centre")))
         self.tbl_cc_eq, self.m_cc_eq = make_table(); l1.addWidget(self.tbl_cc_eq)
         split.addWidget(w1)
         w2 = QWidget(); l2 = QVBoxLayout(w2); l2.setContentsMargins(0, 0, 0, 0)
-        l2.addWidget(QLabel("Cost centres con más actividad de reasignación (por CC actual del equipo)"))
+        l2.addWidget(QLabel(t("Cost centres con más actividad de reasignación (por CC actual del equipo)")))
         self.tbl_cc_by, self.m_cc_by = make_table(); l2.addWidget(self.tbl_cc_by)
         split.addWidget(w2)
         lay.addWidget(split)
@@ -217,12 +263,12 @@ class EquipmentWindow(QMainWindow):
 
     def _build_charts_tab(self) -> QWidget:
         c = QWidget(); grid = QGridLayout(c)
-        self.ch_status = BarChart("Equipos por estado", "Equipos")
-        self.ch_avail = BarChart("Disponibilidad por categoría (%)", "%")
-        self.ch_rfid = TimeSeriesChart("Cambios de RFID por mes", "eventos")
-        self.ch_inout = TimeSeriesChart("Transiciones In→Out por mes", "transiciones")
-        self.ch_top_oi = BarChart("Top equipos Out→In", "veces")
-        self.ch_grp = BarChart("Transiciones In→Out por grupo", "veces")
+        self.ch_status = BarChart(t("Equipos por estado"), t("Equipos"))
+        self.ch_avail = BarChart(t("Disponibilidad por categoría (%)"), "%", value_suffix="%")
+        self.ch_rfid = TimeSeriesChart(t("Cambios de RFID por mes"), t("eventos"))
+        self.ch_inout = TimeSeriesChart(t("Transiciones In→Out por mes"), t("transiciones"))
+        self.ch_top_oi = BarChart(t("Top equipos Out→In"), t("veces"))
+        self.ch_grp = BarChart(t("Transiciones In→Out por grupo"), t("veces"))
         grid.addWidget(self.ch_status, 0, 0); grid.addWidget(self.ch_avail, 0, 1)
         grid.addWidget(self.ch_rfid, 1, 0); grid.addWidget(self.ch_inout, 1, 1)
         grid.addWidget(self.ch_top_oi, 2, 0); grid.addWidget(self.ch_grp, 2, 1)
@@ -234,18 +280,18 @@ class EquipmentWindow(QMainWindow):
         if eq is None or eq.empty:
             return pd.DataFrame()
         out = eq
-        st = self.cmb_status.currentText()
-        if st != "Todos":
+        st = self.cmb_status.currentData()
+        if st is not None:
             out = out[out["status"].astype("string").str.strip() == st]
-        tp = self.cmb_type.currentText()
-        if tp != "Todos":
+        tp = self.cmb_type.currentData()
+        if tp is not None:
             contr = ea._truthy(out.get("is_contractor_vehicle"))
-            out = out[contr] if tp == "Contratistas" else out[~contr]
-        cat = self.cmb_category.currentText()
-        if cat != "Todas":
+            out = out[contr] if tp == "contractor" else out[~contr]
+        cat = self.cmb_category.currentData()
+        if cat is not None:
             out = out[out["category"].astype("string").str.strip() == cat]
-        gr = self.cmb_group.currentText()
-        if gr != "Todos":
+        gr = self.cmb_group.currentData()
+        if gr is not None:
             out = out[out["group"].astype("string").str.strip() == gr]
         txt = self.txt_search.text().strip().lower()
         if txt:
@@ -276,9 +322,9 @@ class EquipmentWindow(QMainWindow):
             self.m_rfid_time.set_dataframe(ea.rfid_changes_over_time(ch))
             self.m_rfid_churn.set_dataframe(ea.rfid_churn_by_tag(ch))
             self.lbl_rfid.setText(
-                f"Eventos RFID: {rs['Eventos RFID']:,}   ·   Asignados: {rs['Asignados']:,}"
-                f"   ·   Cambiados: {rs['Cambiados']:,}   ·   Removidos: {rs['Removidos']:,}"
-                f"   ·   Tags: {rs['Tags (registros)']:,}")
+                f"{t('Eventos RFID')}: {rs['Eventos RFID']:,}   ·   {t('Asignados')}: {rs['Asignados']:,}"
+                f"   ·   {t('Cambiados')}: {rs['Cambiados']:,}   ·   {t('Removidos')}: {rs['Removidos']:,}"
+                f"   ·   {t('Tags')}: {rs['Tags (registros)']:,}")
 
             self.m_trans.set_dataframe(trans)
             self.m_trans_sum.set_dataframe(ea.status_transition_summary(trans))
@@ -301,7 +347,7 @@ class EquipmentWindow(QMainWindow):
             self._apply_filters()      # snapshot (inventario + agrupaciones + KPIs)
             self._update_status()
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Error al analizar",
+            QMessageBox.critical(self, t("Error al analizar"),
                                  f"{exc}\n\n{traceback.format_exc()}")
 
     def _apply_filters(self):
@@ -317,7 +363,7 @@ class EquipmentWindow(QMainWindow):
             self.m_mk.set_dataframe(ea.group_summary(eq, "make", "Marca"))
             self._set_kpis(ea.fleet_kpis(eq), self._rfid_sum, self._trans)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Error al filtrar",
+            QMessageBox.critical(self, t("Error al filtrar"),
                                  f"{exc}\n\n{traceback.format_exc()}")
 
     def _maybe_refresh(self):
@@ -334,25 +380,24 @@ class EquipmentWindow(QMainWindow):
         n_eq, n_ch = len(self._eq_all), len(self._changes)
         loading = self._db.get_watermark("change_events") is None
         if loading:
-            self.statusBar().showMessage(
-                f"Cargando historial de cambios...  {n_ch:,} eventos · {n_eq:,} equipos "
-                "(las pestañas de RFID/transiciones se completan al terminar)")
+            self.statusBar().showMessage(tr_fmt("eq.loading", events=n_ch, equipment=n_eq))
         else:
             self.statusBar().showMessage(
-                f"{n_eq:,} equipos · {n_ch:,} eventos de cambio · "
-                f"actualizado {datetime.now():%H:%M:%S}")
+                tr_fmt("eq.status", equipment=n_eq, events=n_ch,
+                       when=f"{datetime.now():%H:%M:%S}"))
 
     def _update_charts(self, eq_all, ch, trans):
         sb = ea.status_breakdown(eq_all)
-        self.ch_status.set_data(sb["Estado"].tolist(), sb["Equipos"].tolist(), "#1F4E78")
+        self.ch_status.set_data([tr_value(x) for x in sb["Estado"].tolist()],
+                                sb["Equipos"].tolist(), "#1F4E78")
         cat = ea.group_summary(eq_all, "category", "Categoría").head(12)
         self.ch_avail.set_data(cat["Categoría"].tolist() if not cat.empty else [],
                                cat["Disponibilidad %"].tolist() if not cat.empty else [], "#2E7D32")
         rt = ea.rfid_changes_over_time(ch)
         if not rt.empty:
             self.ch_rfid.set_series(rt["Periodo"].tolist(), {
-                "Asignado": rt["Asignado"].tolist(), "Cambiado": rt["Cambiado"].tolist(),
-                "Removido": rt["Removido"].tolist()})
+                t("Asignado"): rt["Asignado"].tolist(), t("Cambiado"): rt["Cambiado"].tolist(),
+                t("Removido"): rt["Removido"].tolist()})
         io = ea.in_to_out_over_time(trans)
         if not io.empty:
             self.ch_inout.set_series(io["Periodo"].tolist(), {"In→Out": io["In->Out"].tolist()})
@@ -370,7 +415,7 @@ class EquipmentWindow(QMainWindow):
             if it.widget():
                 it.widget().deleteLater()
         if not kpis:
-            self._kpi_layout.addWidget(QLabel("Sin equipos para los filtros."))
+            self._kpi_layout.addWidget(QLabel(t("Sin equipos para los filtros.")))
             self._kpi_layout.addStretch(1)
             return
         avail = kpis["Disponibilidad %"]
@@ -378,11 +423,11 @@ class EquipmentWindow(QMainWindow):
         n_io = 0 if trans is None or trans.empty else int(((trans["De"] == IN) & (trans["A"] == OUT)).sum())
         n_oi = 0 if trans is None or trans.empty else int(((trans["De"] == OUT) & (trans["A"] == IN)).sum())
         cards = [
-            kpi_label("Total equipos", f"{kpis['Total equipos']:,}"),
-            kpi_label("En servicio", f"{kpis['En servicio']:,}", "#2E7D32"),
-            warn_label("Fuera de servicio", f"{kpis['Fuera de servicio']:,}", warn=kpis['Fuera de servicio'] > 0),
-            kpi_label("Disponibilidad", f"{avail:.1f}%", color),
-            kpi_label("Eventos RFID", f"{rfid['Eventos RFID']:,}", "#9467bd"),
+            kpi_label(t("Total equipos"), f"{kpis['Total equipos']:,}"),
+            kpi_label(t("En servicio"), f"{kpis['En servicio']:,}", "#2E7D32"),
+            warn_label(t("Fuera de servicio"), f"{kpis['Fuera de servicio']:,}", warn=kpis['Fuera de servicio'] > 0),
+            kpi_label(t("Disponibilidad"), f"{avail:.1f}%", color),
+            kpi_label(t("Eventos RFID"), f"{rfid['Eventos RFID']:,}", "#9467bd"),
             warn_label("In→Out", f"{n_io:,}", warn=n_io > 0),
             kpi_label("Out→In", f"{n_oi:,}", "#1F4E78"),
         ]
@@ -412,12 +457,14 @@ class EquipmentWindow(QMainWindow):
 
     def _on_export(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Exportar análisis de equipos", "Analisis_Equipos_MSGQ.xlsx", "Excel (*.xlsx)")
+            self, t("Exportar análisis de equipos"),
+            t("Analisis_Equipos_MSGQ.xlsx"), "Excel (*.xlsx)")
         if not path:
             return
         try:
             eq = self._filtered(self._eq_all)
             ch, eq_all, trans = self._changes, self._eq_all, self._trans
+            # Claves en español canónico: export_sheets las traduce al idioma activo.
             sheets = {
                 "Inventario": eq[[c for c in _INVENTORY_COLS if c in eq.columns]] if not eq.empty else eq,
                 "Por categoria": ea.group_summary(eq, "category", "Categoría"),
@@ -440,9 +487,9 @@ class EquipmentWindow(QMainWindow):
                 "Calidad de datos": ea.data_completeness(eq_all),
             }
             export_sheets(path, sheets)
-            QMessageBox.information(self, "Exportado", f"Análisis generado:\n{path}")
+            QMessageBox.information(self, t("Exportado"), f"{t('Análisis generado:')}\n{path}")
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Error al exportar",
+            QMessageBox.critical(self, t("Error al exportar"),
                                  f"{exc}\n\n{traceback.format_exc()}")
 
 

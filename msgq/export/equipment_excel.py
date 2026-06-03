@@ -11,6 +11,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from msgq.i18n import t, tr_value
+
 _BLUE_FILL = PatternFill("solid", start_color="1F4E78")
 _BLUE_FONT = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
 _BODY_FONT = Font(name="Calibri", size=10)
@@ -40,14 +42,18 @@ def _cell_value(v):
             return None
     except (TypeError, ValueError):
         pass
+    if pd.api.types.is_bool(v):   # incluye numpy.bool_ / pandas boolean
+        return tr_value("Si" if v else "No")
+    if isinstance(v, str):
+        return tr_value(v)   # solo tokens conocidos; los datos reales pasan intactos
     return v
 
 
 def _write_sheet(ws, df: pd.DataFrame) -> None:
     if df is None or df.empty:
-        ws.append(["(sin datos)"])
+        ws.append([t("(sin dato)")])
         return
-    ws.append([str(c) for c in df.columns])
+    ws.append([t(str(c)) for c in df.columns])   # encabezados traducidos
     for _, row in df.iterrows():
         ws.append([_cell_value(v) for v in row])
     for cell in ws[1]:
@@ -79,7 +85,7 @@ def export_sheets(path: str, sheets: dict[str, pd.DataFrame]) -> None:
         del wb["Sheet"]
     used: set[str] = set()
     for name, df in sheets.items():
-        ws = wb.create_sheet(title=_safe_sheet_name(name, used))
+        ws = wb.create_sheet(title=_safe_sheet_name(t(name), used))
         _write_sheet(ws, df)
     if not wb.sheetnames:
         wb.create_sheet("Vacio")

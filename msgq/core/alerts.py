@@ -20,6 +20,7 @@ from __future__ import annotations
 import pandas as pd
 
 from msgq import config
+from msgq.i18n import tr_fmt
 
 # --- Severidades -----------------------------------------------------------
 SEV_CRITICAL = "CRITICAL"
@@ -67,7 +68,7 @@ def _anomalous_type(mv: pd.DataFrame) -> list[dict]:
         ) else SEV_WARNING
         rows.append(_row(
             r, sev, "Modo de transaccion anomalo",
-            f"Transaccion en modo {r['type']} ({r.get('kind', '')})",
+            tr_fmt("alert.anomalous_type", type=r["type"], kind=r.get("kind", "")),
         ))
     return rows
 
@@ -79,7 +80,7 @@ def _dispense_to_non_operational(mv: pd.DataFrame) -> list[dict]:
     for _, r in mv[mask].iterrows():
         rows.append(_row(
             r, SEV_CRITICAL, "Despacho a equipo no operativo",
-            f"Despacho a equipo en estado '{r.get('equipment_status')}'",
+            tr_fmt("alert.dispense_non_op", status=r.get("equipment_status")),
         ))
     return rows
 
@@ -101,7 +102,7 @@ def _high_contamination(mv: pd.DataFrame) -> list[dict]:
         if breached:
             rows.append(_row(
                 r, SEV_WARNING, "Contaminacion de combustible alta",
-                "Contaminacion ISO sobre umbral: " + ", ".join(breached),
+                tr_fmt("alert.contamination", breaches=", ".join(breached)),
             ))
     return rows
 
@@ -129,8 +130,8 @@ def _service_truck_bypass_volume(mv: pd.DataFrame) -> list[dict]:
                 "equipment_description": last.get("equipment_description"),
                 "type": config.TYPE_KEY_BYPASS,
                 "volume": round(float(total), 1),
-                "detail": (f"Volumen acumulado en bypass: {total:,.0f} L "
-                           f"(umbral {config.SERVICE_TRUCK_BYPASS_VOLUME_L:,.0f} L)"),
+                "detail": tr_fmt("alert.bypass_volume", total=total,
+                                 threshold=config.SERVICE_TRUCK_BYPASS_VOLUME_L),
                 "source_id": last.get("id"),
             })
     return rows
@@ -165,16 +166,16 @@ def detect_adaptmac_alerts(mac: pd.DataFrame, now: pd.Timestamp | None = None) -
         code = r.get("code")
         if r.get("key_bypass"):
             rows.append(_mac_row(r, SEV_CRITICAL, "Consola en modo bypass",
-                                  f"AdaptMAC {code} con key_bypass activo"))
+                                  tr_fmt("alert.mac_bypass", code=code)))
         if r.get("online") is False:
             rows.append(_mac_row(r, SEV_WARNING, "Consola offline",
-                                  f"AdaptMAC {code} reporta offline"))
+                                  tr_fmt("alert.mac_offline", code=code)))
         else:
             last = r.get("last_successful_comms")
             if pd.notna(last) and (now - last) > stale_delta:
                 mins = int((now - last).total_seconds() // 60)
                 rows.append(_mac_row(r, SEV_WARNING, "Comunicacion stale",
-                                     f"AdaptMAC {code} sin comms exitosa hace {mins} min"))
+                                     tr_fmt("alert.mac_stale", code=code, mins=mins)))
     if not rows:
         return _empty_alerts()
     return pd.DataFrame(rows, columns=ALERT_COLS).reset_index(drop=True)

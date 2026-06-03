@@ -10,6 +10,8 @@ import pandas as pd
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
 
+from msgq.i18n import t, tr_value
+
 SORT_ROLE = Qt.UserRole + 1
 
 # Colores de fondo por severidad (suaves, para no saturar la tabla).
@@ -71,15 +73,16 @@ class DataFrameModel(QAbstractTableModel):
             return ""
         if isinstance(value, pd.Timestamp):
             return value.strftime("%d/%m/%Y %H:%M:%S")
+        if pd.api.types.is_bool(value):   # incluye numpy.bool_ / pandas boolean
+            return tr_value("Si" if value else "No")
         if isinstance(value, float):
             return f"{value:,.2f}"
-        if isinstance(value, bool):
-            return "Si" if value else "No"
-        return str(value)
+        # Solo traduce tokens conocidos; los datos reales pasan intactos.
+        return tr_value(str(value))
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role != Qt.DisplayRole:
             return None
         if orientation == Qt.Horizontal:
-            return str(self._df.columns[section])
+            return t(str(self._df.columns[section]))
         return str(self._df.index[section])
