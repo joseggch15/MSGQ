@@ -361,6 +361,75 @@ _EN.update({
     "Comunicacion stale": "Stale communication",
 })
 
+# --- Módulo de Análisis de Tanques (ventana, KPIs, gráficas, columnas) ------
+_EN.update({
+    "MSGQ — Análisis de Tanques  ·  Newmont Merian":
+        "MSGQ — Tank Analysis  ·  Newmont Merian",
+    "Analizar tanques…": "Analyze tanks…",
+    "Abre el análisis de tanques: reconciliación, niveles, despachos y gráficas "
+    "(en vivo desde el endpoint).":
+        "Opens the tank analysis: reconciliation, levels, dispenses and charts "
+        "(live from the endpoint).",
+    "Circuito:": "Circuit:",
+    "Rango:": "Range:",
+    "Gasolina": "Gasoline",
+    # rangos
+    "Todo el rango": "All",
+    "Últimos 7 días": "Last 7 days",
+    "Últimos 30 días": "Last 30 days",
+    "Últimos 90 días": "Last 90 days",
+    "Últimos 12 meses": "Last 12 months",
+    # pestañas
+    "Reconciliación": "Reconciliation",
+    "Reconciliación diaria": "Daily reconciliation",
+    "Niveles": "Levels",
+    "Despachos": "Dispenses",
+    "Por tanque": "By tank",
+    "Por producto": "By product",
+    "Flujo por tanque": "Flow by tank",
+    # gráficas / ejes
+    "Stock por día (L)": "Stock per day (L)",
+    "Stock (L)": "Stock (L)",
+    "Error de reconciliación por tanque": "Reconciliation error by tank",
+    "Tendencia de stock (L)": "Stock trend (L)",
+    "Burn rate (volumen despachado)": "Burn rate (dispensed volume)",
+    # KPIs
+    "Tanques": "Tanks",
+    "Error total (L)": "Total error (L)",
+    "Peor tanque": "Worst tank",
+    "Volumen despachado (L)": "Dispensed volume (L)",
+    "Sin reconciliaciones para el filtro.": "No reconciliations for the filter.",
+    # exportación
+    "Exportar análisis de tanques": "Export tank analysis",
+    "Analisis_Tanques_MSGQ.xlsx": "Tank_Analysis_MSGQ.xlsx",
+    "Reconciliacion": "Reconciliation",
+    "Reconciliacion diaria": "Daily reconciliation",
+    "Despachos por tanque": "Dispenses by tank",
+    "Despachos por producto": "Dispenses by product",
+    "Despachos por grupo": "Dispenses by group",
+    "Despachos por departamento": "Dispenses by department",
+    # encabezados de columna de la analítica de tanques
+    "Tanque": "Tank",
+    "Producto": "Product",
+    "Stock inicial (L)": "Opening stock (L)",
+    "Stock final (L)": "Closing stock (L)",
+    "Cambio de stock (L)": "Net stock change (L)",
+    "Inflow (L)": "Inflow (L)",
+    "Outflow (L)": "Outflow (L)",
+    "Cambio movimiento (L)": "Net movement change (L)",
+    "Error (L)": "Error (L)",
+    "Error % outflow": "Error % outflow",
+    "Dia": "Day",
+    "Volumen (L)": "Volume (L)",
+    "Circuito": "Circuit",
+    "Entregas (L)": "Deliveries (L)",
+    "Despachos (L)": "Dispenses (L)",
+    "Transferencias salida (L)": "Transfers out (L)",
+    "Neto transacciones (L)": "Net transactions (L)",
+    "Neto (L)": "Net (L)",
+    "Volumen despachado (L)": "Dispensed volume (L)",
+})
+
 # ===========================================================================
 # Valores de celda traducibles (lista blanca) — nunca toca datos reales
 # ===========================================================================
@@ -420,6 +489,12 @@ _TPL: dict[str, tuple[str, str]] = {
     "eq.status": (
         "{equipment:,} equipos · {events:,} eventos de cambio · actualizado {when}",
         "{equipment:,} equipment · {events:,} change events · updated {when}"),
+    "tank.loading": (
+        "Cargando reconciliaciones…  {recons:,} filas · {tanks:,} tanques",
+        "Loading reconciliations…  {recons:,} rows · {tanks:,} tanks"),
+    "tank.status": (
+        "{recons:,} reconciliaciones · {tanks:,} tanques",
+        "{recons:,} reconciliations · {tanks:,} tanks"),
 }
 
 

@@ -282,6 +282,69 @@ def test_tanks_recons_storage_roundtrip():
         shutil.rmtree(work, ignore_errors=True)
 
 
+# ===========================================================================
+# 11. Reconciliacion: agregado por tanque, diaria, serie de stock y KPIs
+# ===========================================================================
+
+def _recon_node(tank, prod, period_end, opening, closing, inflow, outflow, status="all_ok"):
+    err = round((closing - opening) - (inflow - outflow), 2)
+    return {
+        "id": f"{tank}-{period_end}", "periodStart": None, "periodEnd": period_end,
+        "openingStock": str(opening), "closingStock": str(closing),
+        "inflowVolume": str(inflow), "outflowVolume": str(outflow),
+        "volume": str(err), "status": status, "recordUpdatedAt": period_end,
+        "target": {"code": tank, "description": tank},
+        "product": {"description": prod},
+    }
+
+
+def _recon_fixture():
+    return transform.reconciliations_to_df([
+        _recon_node("Main", "Diesel", "2026-01-01T23:59:00", 1000, 950, 0, 50),
+        _recon_node("Main", "Diesel", "2026-01-02T23:59:00", 950, 1100, 200, 40),
+        _recon_node("Gas", "Unleaded Gasoline", "2026-01-02T23:59:00", 500, 480, 0, 18),
+    ])
+
+
+def test_reconciliation_detail():
+    rec = _recon_fixture()
+    det = ta.reconciliation_detail(rec)
+    main = det[det["Tanque"] == "Main"].iloc[0]
+    assert float(main["Stock inicial (L)"]) == 1000.0      # primer opening
+    assert float(main["Stock final (L)"]) == 1100.0        # ultimo closing
+    assert float(main["Inflow (L)"]) == 200.0              # suma
+    assert float(main["Outflow (L)"]) == 90.0              # 50 + 40
+    assert float(main["Cambio de stock (L)"]) == 100.0     # 1100 - 1000
+    assert float(main["Cambio movimiento (L)"]) == 110.0   # 200 - 90
+    assert float(main["Error (L)"]) == -10.0               # 100 - 110
+    # Filtro de circuito: solo Diesel -> sin la fila de gasolina.
+    only_d = ta.reconciliation_detail(rec, circuit="Diesel")
+    assert set(only_d["Tanque"]) == {"Main"}
+    print("OK  test_reconciliation_detail")
+
+
+def test_reconciliation_daily_and_stock():
+    rec = _recon_fixture()
+    daily = ta.reconciliation_daily(rec)
+    assert len(daily) == 3
+    m2 = daily[(daily["Tanque"] == "Main") & (daily["Stock final (L)"] == 1100.0)].iloc[0]
+    assert float(m2["Error (L)"]) == -10.0
+
+    periods, series = ta.stock_series(rec, circuit="Diesel")
+    assert len(periods) == 2 and "Main" in series
+    assert series["Main"][-1] == 1100.0   # ultimo closing del Main
+    print("OK  test_reconciliation_daily_and_stock")
+
+
+def test_reconciliation_kpis():
+    rec = _recon_fixture()
+    k = ta.reconciliation_kpis(rec)
+    assert k["Tanques"] == 2
+    assert abs(k["Error total (L)"] - (-12.0)) < 0.1     # -10 + -2
+    assert k["Peor tanque"] == "Main"                    # |−10| > |−2|
+    print("OK  test_reconciliation_kpis")
+
+
 if __name__ == "__main__":
     tests = [
         test_classify_circuit,
@@ -294,6 +357,9 @@ if __name__ == "__main__":
         test_tanks_pipeline,
         test_reconciliations_pipeline,
         test_tanks_recons_storage_roundtrip,
+        test_reconciliation_detail,
+        test_reconciliation_daily_and_stock,
+        test_reconciliation_kpis,
     ]
     failed = 0
     for t in tests:

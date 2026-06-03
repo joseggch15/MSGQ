@@ -220,6 +220,133 @@ def flow_over_time(movements: pd.DataFrame, freq: str = "D") -> pd.DataFrame:
     return g[cols].reset_index(drop=True)
 
 
+# ===========================================================================
+# Reconciliacion (modelo Veridapt 'Detailed Reconciliation', nativo del endpoint)
+# ===========================================================================
+# Cada fila de `reconciliations` es UN dia de UN tanque con:
+#   opening_stock, closing_stock  (stock medido por el sensor)
+#   inflow, outflow               (movimiento)
+#   error = (closing-opening) - (inflow-outflow)   (lo pre-calcula la API)
+
+def _filter_recons(recons: pd.DataFrame, circuit: str | None = None,
+                   start=None, end=None) -> pd.DataFrame:
+    if recons is None or recons.empty:
+        return pd.DataFrame(columns=(recons.columns if recons is not None else []))
+    df = recons.copy()
+    if circuit not in (None, "", "Todos") and "product" in df.columns:
+        df = df[df["product"].map(classify_circuit) == circuit]
+    if "period_end" in df.columns:
+        if start is not None:
+            df = df[df["period_end"] >= pd.Timestamp(start)]
+        if end is not None:
+            df = df[df["period_end"] <= pd.Timestamp(end)]
+    return df
+
+
+def _err_pct(error: float, outflow: float):
+    return round(error / outflow * 100, 2) if outflow else None
+
+
+def reconciliation_detail(recons: pd.DataFrame, circuit: str | None = None,
+                          start=None, end=None) -> pd.DataFrame:
+    """Reconciliacion agregada por tanque sobre el periodo elegido (estilo
+    'Detailed Reconciliation'): stock inicial/final, inflow/outflow y error."""
+    cols = ["Tanque", "Producto", "Stock inicial (L)", "Stock final (L)",
+            "Cambio de stock (L)", "Inflow (L)", "Outflow (L)",
+            "Cambio movimiento (L)", "Error (L)", "Error % outflow"]
+    df = _filter_recons(recons, circuit, start, end)
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df = df.dropna(subset=["period_end"]).sort_values("period_end")
+    rows = []
+    for tank, chunk in df.groupby("tank"):
+        chunk = chunk.sort_values("period_end")
+        opening = float(chunk["opening_stock"].iloc[0])
+        closing = float(chunk["closing_stock"].iloc[-1])
+        inflow = float(chunk["inflow"].fillna(0).sum())
+        outflow = float(chunk["outflow"].fillna(0).sum())
+        net_stock = closing - opening
+        net_move = inflow - outflow
+        error = net_stock - net_move
+        rows.append({
+            "Tanque": tank,
+            "Producto": chunk["product"].iloc[0],
+            "Stock inicial (L)": round(opening, 1),
+            "Stock final (L)": round(closing, 1),
+            "Cambio de stock (L)": round(net_stock, 1),
+            "Inflow (L)": round(inflow, 1),
+            "Outflow (L)": round(outflow, 1),
+            "Cambio movimiento (L)": round(net_move, 1),
+            "Error (L)": round(error, 1),
+            "Error % outflow": _err_pct(error, outflow),
+        })
+    out = pd.DataFrame(rows, columns=cols)
+    return out.sort_values("Error (L)", key=lambda s: s.abs(),
+                           ascending=False).reset_index(drop=True)
+
+
+def reconciliation_daily(recons: pd.DataFrame, circuit: str | None = None,
+                         start=None, end=None) -> pd.DataFrame:
+    """Reconciliacion dia por dia y por tanque (filas tal cual, con error %)."""
+    cols = ["Dia", "Tanque", "Producto", "Stock inicial (L)", "Stock final (L)",
+            "Inflow (L)", "Outflow (L)", "Error (L)", "Error % outflow", "Estado"]
+    df = _filter_recons(recons, circuit, start, end)
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df = df.dropna(subset=["period_end"]).copy()
+    out = pd.DataFrame({
+        "Dia": df["period_end"].dt.normalize(),
+        "Tanque": df["tank"],
+        "Producto": df["product"],
+        "Stock inicial (L)": df["opening_stock"].round(1),
+        "Stock final (L)": df["closing_stock"].round(1),
+        "Inflow (L)": df["inflow"].round(1),
+        "Outflow (L)": df["outflow"].round(1),
+        "Error (L)": df["error"].round(1),
+        "Error % outflow": [
+            _err_pct(e, o) for e, o in zip(df["error"].fillna(0), df["outflow"].fillna(0))
+        ],
+        "Estado": df["status"],
+    })
+    return out.sort_values(["Dia", "Tanque"], ascending=[False, True]).reset_index(drop=True)
+
+
+def stock_series(recons: pd.DataFrame, circuit: str | None = None,
+                 start=None, end=None):
+    """Serie de stock final (closing) por dia y por tanque, para graficar el
+    nivel en el tiempo. Devuelve (periodos, {tanque: [valores]})."""
+    df = _filter_recons(recons, circuit, start, end)
+    if df.empty:
+        return [], {}
+    df = df.dropna(subset=["period_end", "closing_stock"]).copy()
+    if df.empty:
+        return [], {}
+    df["_day"] = df["period_end"].dt.normalize()
+    pivot = (df.pivot_table(index="_day", columns="tank",
+                            values="closing_stock", aggfunc="last").sort_index())
+    periods = list(pivot.index)
+    series = {str(col): pivot[col].tolist() for col in pivot.columns}
+    return periods, series
+
+
+def reconciliation_kpis(recons: pd.DataFrame, circuit: str | None = None,
+                        start=None, end=None) -> dict:
+    """KPIs de reconciliacion: error total, % sobre outflow y peor tanque."""
+    detail = reconciliation_detail(recons, circuit, start, end)
+    if detail.empty:
+        return {}
+    total_error = float(detail["Error (L)"].sum())
+    total_outflow = float(detail["Outflow (L)"].sum())
+    worst = detail.iloc[0]   # ya viene ordenado por |error| descendente
+    return {
+        "Tanques": int(len(detail)),
+        "Error total (L)": round(total_error, 1),
+        "Error % outflow": _err_pct(total_error, total_outflow) or 0.0,
+        "Peor tanque": worst["Tanque"],
+        "Peor error (L)": round(float(worst["Error (L)"]), 1),
+    }
+
+
 def circuit_summary(movements: pd.DataFrame) -> pd.DataFrame:
     """Resumen por circuito: despachos (n y volumen) y entregas."""
     cols = ["Circuito", "Despachos", "Volumen despachado (L)", "Entregas (L)"]

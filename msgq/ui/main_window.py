@@ -67,6 +67,7 @@ class MainWindow(QMainWindow):
         self._poller: Poller | None = None
         self._monitoring = False
         self._eq_window = None
+        self._tank_window = None
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(_REFRESH_MS)
@@ -123,9 +124,9 @@ class MainWindow(QMainWindow):
             self._set_inputs_enabled(not self._monitoring)
         self._last_counts = None
         self._refresh_views(force=True)
-        eqw = self._eq_window
-        if eqw is not None and eqw.isVisible():
-            eqw.rebuild_ui()
+        for child in (self._eq_window, self._tank_window):
+            if child is not None and child.isVisible():
+                child.rebuild_ui()
 
     # =======================================================================
     # Construccion de la interfaz
@@ -206,6 +207,12 @@ class MainWindow(QMainWindow):
             "transiciones In↔Out, auditoría y gráficas."))
         self.btn_analyze.clicked.connect(self._on_open_equipment)
         r3.addWidget(self.btn_analyze)
+        self.btn_tanks = QPushButton(t("Analizar tanques…"))
+        self.btn_tanks.setToolTip(t(
+            "Abre el análisis de tanques: reconciliación, niveles, despachos y gráficas "
+            "(en vivo desde el endpoint)."))
+        self.btn_tanks.clicked.connect(self._on_open_tanks)
+        r3.addWidget(self.btn_tanks)
         col.addLayout(r3)
         return box
 
@@ -221,6 +228,19 @@ class MainWindow(QMainWindow):
             return
         self._eq_window = EquipmentWindow(self._db, self)
         self._eq_window.show()
+
+    def _on_open_tanks(self):
+        # Import perezoso: pyqtgraph solo se carga al abrir el análisis.
+        try:
+            from msgq.ui.tank_window import TankWindow
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self, t("Falta pyqtgraph"),
+                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
+                f"{t('Instala la dependencia: pip install pyqtgraph')}")
+            return
+        self._tank_window = TankWindow(self._db, self)
+        self._tank_window.show()
 
     def _build_kiosk_banner(self) -> QGroupBox:
         """Banner de la version turnkey (sin token por pantalla) + acceso al análisis."""
@@ -241,6 +261,9 @@ class MainWindow(QMainWindow):
         self.btn_analyze.setObjectName("accent")
         self.btn_analyze.clicked.connect(self._on_open_equipment)
         row.addWidget(self.btn_analyze)
+        self.btn_tanks = QPushButton(t("Analizar tanques…"))
+        self.btn_tanks.clicked.connect(self._on_open_tanks)
+        row.addWidget(self.btn_tanks)
         return box
 
     def _build_kpi_strip(self) -> QFrame:
