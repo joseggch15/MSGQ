@@ -191,3 +191,5 @@ python tests/test_e2e.py      # o:  pytest tests/test_e2e.py -v
 - Mapa de calor de `gps_coordinates` y mantenimiento predictivo sobre SMU +
   `serviceInterval`.
 - Cruce con maestros ERP (SAP) vía `erp_reference` para conciliación.
+#   M S G Q  
+ 
