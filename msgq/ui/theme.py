@@ -37,6 +37,13 @@ _DARK_ACCENTS = {
     "#E0A000": "#F0C040",   # ámbar
 }
 
+# Fondo de fila por severidad de alerta. En claro: pasteles suaves (texto oscuro).
+# En oscuro: tintes oscuros para que el texto claro del tema siga legible.
+_SEVERITY_BG = {
+    "light": {"CRITICAL": "#FDE7E9", "WARNING": "#FFF4E5", "INFO": "#E8F0FE"},
+    "dark":  {"CRITICAL": "#5C2B2B", "WARNING": "#5A4A28", "INFO": "#2A3F52"},
+}
+
 
 def set_theme(name) -> None:
     global _theme
@@ -63,6 +70,12 @@ def chart_colors() -> tuple[str, str]:
 def accent(color: str) -> str:
     """Ajusta un color semántico al tema actual (lo aclara en modo oscuro)."""
     return _DARK_ACCENTS.get(color, color) if _theme == "dark" else color
+
+
+def severity_bg(severity) -> str | None:
+    """Color de fondo de fila para una severidad de alerta, según el tema.
+    Devuelve None si la severidad no es conocida (sin coloreado)."""
+    return _SEVERITY_BG[_theme].get(severity)
 
 
 def apply_theme(app: QApplication | None = None) -> None:

@@ -11,15 +11,9 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
 
 from msgq.i18n import t, tr_value
+from msgq.ui import theme
 
 SORT_ROLE = Qt.UserRole + 1
-
-# Colores de fondo por severidad (suaves, para no saturar la tabla).
-_SEVERITY_BG = {
-    "CRITICAL": QColor("#FDE7E9"),
-    "WARNING":  QColor("#FFF4E5"),
-    "INFO":     QColor("#E8F0FE"),
-}
 
 
 class DataFrameModel(QAbstractTableModel):
@@ -60,9 +54,9 @@ class DataFrameModel(QAbstractTableModel):
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     return int(Qt.AlignRight | Qt.AlignVCenter)
             if role == Qt.BackgroundRole and "severity" in self._df.columns:
-                sev = self._df.iloc[index.row()].get("severity")
-                if sev in _SEVERITY_BG:
-                    return _SEVERITY_BG[sev]
+                color = theme.severity_bg(self._df.iloc[index.row()].get("severity"))
+                if color is not None:
+                    return QColor(color)
         except Exception:  # noqa: BLE001
             return None
         return None
