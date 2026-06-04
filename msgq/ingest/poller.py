@@ -161,22 +161,39 @@ class Poller(QThread):
         return state["rows"]
 
     async def _sync_movements(self, source) -> int:
-        """Trae movimientos creados/modificados desde el watermark (o desde la
-        ventana inicial si es el primer arranque), y actualiza el watermark."""
+        """Movimientos. Incremental por watermark; en el PRIMER arranque (sin
+        watermark) hace un backfill historico PROGRESIVO desde
+        `MOVEMENTS_HISTORY_START`, asi el software refleja el FMS y se pueden
+        auditar anomalias historicas. Upsert por pagina (idempotente)."""
         watermark = self._db.get_watermark("movements")
         if watermark:
             updated_from = watermark - _WATERMARK_EPSILON
-        else:
-            updated_from = datetime.now() - timedelta(
-                days=self._settings.initial_lookback_days)
+            df = transform.movements_to_df(await source.fetch_movements(updated_from))
+            n = self._db.upsert("movements", df)
+            new_wm = self._max_updated(df)
+            if new_wm is not None:
+                self._db.set_watermark("movements", max(new_wm, watermark))
+            return n
 
-        df = transform.movements_to_df(await source.fetch_movements(updated_from))
-        n = self._db.upsert("movements", df)
-        new_wm = self._max_updated(df)
-        if new_wm is not None:
-            self._db.set_watermark(
-                "movements", max(new_wm, watermark) if watermark else new_wm)
-        return n
+        # Primer arranque: backfill historico completo (carga inicial larga, 1 vez).
+        history_from = datetime.fromisoformat(
+            config.MOVEMENTS_HISTORY_START.replace("Z", ""))
+        state: dict = {"rows": 0, "max_ts": None}
+
+        def on_page(nodes: list[dict]) -> None:
+            df = transform.movements_to_df(nodes)
+            self._db.upsert("movements", df)
+            state["rows"] += len(df)
+            ts = self._max_ts(df, "updated_at")
+            if ts is not None:
+                state["max_ts"] = ts if state["max_ts"] is None else max(state["max_ts"], ts)
+            self.status.emit(
+                f"Sincronizando historial de movimientos… {state['rows']:,}")
+
+        await source.fetch_movements_paged(history_from, on_page)
+        if state["max_ts"] is not None:
+            self._db.set_watermark("movements", state["max_ts"])
+        return state["rows"]
 
     async def _sync_equipment(self, source) -> tuple[int, int]:
         """Refresca el maestro de equipos y, de los MISMOS nodes (una sola query),

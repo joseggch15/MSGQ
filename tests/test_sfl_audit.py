@@ -149,6 +149,82 @@ def test_consumption_limits_transform_and_roundtrip():
 
 
 # ===========================================================================
+# 3b. Conflictos: despachos sin equipo / Unauthorised
+# ===========================================================================
+
+def _conf_disp(id_, eq, product, volume, status, typ, when="2026-04-05"):
+    return {"id": id_, "kind": config.KIND_DISPENSE, "equipment_id": eq,
+            "product": product, "volume": volume, "status": status, "type": typ,
+            "tank": "LFO Lane 3", "field_user": "A. Singh",
+            "record_collected_at": pd.Timestamp(when)}
+
+
+def test_unattributed_conflicts():
+    lim = _lim_df([
+        {"id": "1", "equipment_id": "EQ1", "product": "Diesel", "sfl": 1893},
+        {"id": "2", "equipment_id": "EQ2", "product": "Diesel", "sfl": 560},
+    ])  # SFL maximo de flota para Diesel = 1893
+    mv = _mv_df([
+        _conf_disp("c1", None, "Diesel", 2759.4, "no_equip", "Unauthorised"),     # over_max
+        _conf_disp("c2", "Unauthorised", "Diesel", 150.0, "no_equip", "Unauthorised"),  # conflicto, no over
+        _disp("d1", "EQ1", "Diesel", 100.0, "2026-04-07"),                        # con equipo -> NO conflicto
+    ])
+    conf = sa.unattributed_conflicts(mv, lim)
+    assert len(conf) == 2
+    assert list(conf.columns) == sa.CONFLICT_COLS
+    big = conf[conf["source_id"] == "c1"].iloc[0]
+    assert bool(big["over_max"]) is True and big["fleet_max_sfl"] == 1893
+    small = conf[conf["source_id"] == "c2"].iloc[0]
+    assert bool(small["over_max"]) is False
+    assert sa.fleet_sfl_by_product(lim)["DIESEL"] == 1893
+    k = sa.conflict_kpis(conf)
+    assert k["Conflictos"] == 2 and k["Sobre SFL flota"] == 1
+    print("OK  test_unattributed_conflicts")
+
+
+def test_detect_sfl_conflict_alerts():
+    lim = _lim_df([{"id": "1", "equipment_id": "EQ1", "product": "Diesel", "sfl": 1893}])
+    mv = _mv_df([
+        _conf_disp("c1", None, "Diesel", 2759.4, "no_equip", "Unauthorised"),  # over_max -> CRITICAL
+        _conf_disp("c2", None, "Diesel", 150.0, "no_equip", "Unauthorised"),   # no over -> sin alerta SFL
+    ])
+    alerts = al.detect_sfl_conflict_alerts(mv, lim)
+    assert len(alerts) == 1
+    a = alerts.iloc[0]
+    assert a["severity"] == al.SEV_CRITICAL
+    assert a["category"] == config.ALERT_SFL_CONFLICT
+    assert a["source_id"] == "c1" and a["detail"]
+    print("OK  test_detect_sfl_conflict_alerts")
+
+
+def test_fetch_movements_paged_parity_and_backfill():
+    from PySide6.QtCore import QCoreApplication
+    from msgq.ingest.poller import Poller
+
+    # Paridad: fetch_movements_paged entrega lotes con `kind`.
+    async def _paged():
+        src = make_source(config.Settings(demo_mode=True, token="", db_path=":memory:"))
+        out = []
+        await src.fetch_movements_paged(None, out.extend)
+        await src.aclose()
+        return out
+    paged = asyncio.run(_paged())
+    assert len(paged) >= 1 and all("kind" in n for n in paged)
+
+    # Backfill del primer arranque: sin watermark -> usa paged y fija watermark.
+    QCoreApplication.instance() or QCoreApplication([])
+    db = Database(":memory:")
+    src = make_source(config.Settings(demo_mode=True, token="", db_path=":memory:"))
+    poller = Poller(config.Settings(demo_mode=True, token="", db_path=":memory:"), db)
+    n = asyncio.run(poller._sync_movements(src))
+    asyncio.run(src.aclose())
+    assert n >= 1 and db.row_count("movements") >= 1
+    assert db.get_watermark("movements") is not None
+    db.close()
+    print("OK  test_fetch_movements_paged_parity_and_backfill")
+
+
+# ===========================================================================
 # 4. Smoke E2E con el simulador
 # ===========================================================================
 
@@ -187,6 +263,9 @@ if __name__ == "__main__":
         test_kpis_and_groupings,
         test_detect_sfl_alerts,
         test_consumption_limits_transform_and_roundtrip,
+        test_unattributed_conflicts,
+        test_detect_sfl_conflict_alerts,
+        test_fetch_movements_paged_parity_and_backfill,
         test_e2e_sfl_via_simulator,
     ]
     failed = 0

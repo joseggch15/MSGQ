@@ -89,6 +89,13 @@ class SimulatorSource:
         n = self._rng.randint(3, 12)
         return [self._make_movement() for _ in range(n)]
 
+    async def fetch_movements_paged(self, updated_from: datetime | None, on_page) -> None:
+        """Entrega los movimientos por pagina (el demo no tiene historial real, asi
+        que es un solo lote). Mantiene el contrato usado por el backfill del poller."""
+        nodes = await self.fetch_movements(updated_from)
+        if nodes:
+            on_page(nodes)
+
     async def fetch_equipment(self, updated_from: datetime | None) -> list[dict]:
         """Primer ciclo: roster completo (forma GraphQL documentada). Luego, pocos."""
         if not self._equipment_sent:

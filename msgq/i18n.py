@@ -127,6 +127,8 @@ _RAW: dict[str, tuple[str, str]] = {
     "excess": ("Exceso (L)", "Excess (L)"),
     "excess_pct": ("Exceso %", "Excess %"),
     "dispensing_point": ("Punto de despacho", "Dispensing point"),
+    "fleet_max_sfl": ("SFL máx flota", "Fleet max SFL"),
+    "over_max": ("Sobre SFL flota", "Over fleet SFL"),
 }
 
 _ES: dict[str, str] = {k: es for k, (es, _en) in _RAW.items()}
@@ -522,11 +524,16 @@ _EN.update({
     # pestañas
     "Excesos": "Exceedances",
     "Por equipo": "By equipment",
+    "Conflictos": "Conflicts",
     # KPIs / encabezados analíticos
     "Exceso total (L)": "Total excess (L)",
     "Peor exceso (L)": "Worst excess (L)",
     "Equipos afectados": "Affected equipment",
     "% de despachos": "% of dispenses",
+    "Sobre SFL flota": "Over fleet SFL",
+    "Volumen conflictivo (L)": "Conflicting volume (L)",
+    "Sin equipo (despachos)": "No equipment (dispenses)",
+    "Despacho sin equipo / no autorizado": "Equipment-less / unauthorised dispense",
     # gráficas
     "Excesos de SFL por mes": "SFL exceedances per month",
     "Excesos por producto": "Exceedances by product",
@@ -559,7 +566,7 @@ _VALUE_TOKENS = frozenset({
     "Modo de transaccion anomalo", "Despacho a equipo no operativo",
     "Contaminacion de combustible alta", "Service truck en bypass (volumen acumulado)",
     "Consola en modo bypass", "Consola offline", "Comunicacion stale",
-    "Despacho excede Safe Fill Level",
+    "Despacho excede Safe Fill Level", "Despacho sin equipo / no autorizado",
 })
 
 # ===========================================================================
@@ -590,6 +597,9 @@ _TPL: dict[str, tuple[str, str]] = {
     "alert.sfl_exceedance": (
         "Despacho de {volume:,.0f} L excede el SFL de {sfl:,.0f} L ({product}) por {excess:,.0f} L",
         "Dispense of {volume:,.0f} L exceeds the SFL of {sfl:,.0f} L ({product}) by {excess:,.0f} L"),
+    "alert.sfl_conflict": (
+        "Despacho sin equipo de {volume:,.0f} L ({product}) supera el SFL máximo de flota {fleet_max:,.0f} L",
+        "Equipment-less dispense of {volume:,.0f} L ({product}) exceeds fleet max SFL {fleet_max:,.0f} L"),
     "import.success": (
         "Se cargaron {n:,} equipos desde:\n{file}\n\n"
         "Sugerencia: deja el «Modo demo» apagado para que el simulador no "

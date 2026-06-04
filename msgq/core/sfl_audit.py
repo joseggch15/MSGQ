@@ -100,6 +100,100 @@ def exceedances(movements: pd.DataFrame | None,
 
 
 # ===========================================================================
+# Conflictos: despachos SIN equipo valido (no_equip / Unauthorised)
+# ===========================================================================
+# Un despacho sin equipo no se puede contrastar contra el SFL de un equipo
+# concreto; si ademas su volumen supera el SFL MAXIMO de la flota para ese
+# producto, es un sobrellenado que no es seguro para NINGUN equipo -> conflicto
+# critico. Cubre el caso del usuario: combustible despachado como 'no_equip' /
+# 'Unauthorised' (y luego, quiza, reasignado al equipo equivocado).
+
+CONFLICT_COLS = [
+    "date", "equipment_id", "product", "volume", "type", "status",
+    "fleet_max_sfl", "over_max", "field_user", "dispensing_point", "source_id",
+]
+
+
+def fleet_sfl_by_product(limits: pd.DataFrame | None) -> dict:
+    """Mapa {PRODUCTO_MAYUS: SFL maximo de la flota} desde `consumption_limits`."""
+    out: dict = {}
+    if limits is None or limits.empty or "sfl" not in limits.columns:
+        return out
+    df = limits.copy()
+    df["sfl"] = pd.to_numeric(df["sfl"], errors="coerce")
+    df = df.dropna(subset=["sfl"])
+    if df.empty:
+        return out
+    df["_p"] = _norm(df["product"])
+    for p, chunk in df.groupby("_p"):
+        out[p] = float(chunk["sfl"].max())
+    return out
+
+
+def _blank_id(s: pd.Series) -> pd.Series:
+    txt = s.astype("string").str.strip()
+    return s.isna() | txt.eq("") | txt.str.upper().isin(["<NA>", "NAN", "UNAUTHORISED"])
+
+
+def unattributed_conflicts(movements: pd.DataFrame | None,
+                           limits: pd.DataFrame | None) -> pd.DataFrame:
+    """Despachos sin equipo valido (status 'no_equip', tipo 'Unauthorised', o
+    equipment_id vacio/'Unauthorised'). `over_max` = el volumen supera el SFL
+    maximo de la flota para ese producto (sobrellenado para cualquier equipo)."""
+    if movements is None or movements.empty:
+        return pd.DataFrame(columns=CONFLICT_COLS)
+    mv = movements
+    if "kind" in mv.columns:
+        mv = mv[mv["kind"] == config.KIND_DISPENSE]
+    if mv.empty:
+        return pd.DataFrame(columns=CONFLICT_COLS)
+    mv = mv.copy()
+    idx = mv.index
+    status = (mv["status"].astype("string").str.strip().str.lower()
+              if "status" in mv.columns else pd.Series("", index=idx))
+    typ = (mv["type"].astype("string").str.strip()
+           if "type" in mv.columns else pd.Series("", index=idx))
+    no_eq = (_blank_id(mv["equipment_id"]) if "equipment_id" in mv.columns
+             else pd.Series(True, index=idx))
+    mask = (status.eq("no_equip") | typ.eq(config.TYPE_UNAUTHORISED) | no_eq)
+    mask = mask.fillna(False).astype(bool)   # NA-safe para indexar
+    conf = mv[mask].copy()
+    if conf.empty:
+        return pd.DataFrame(columns=CONFLICT_COLS)
+
+    fleet = fleet_sfl_by_product(limits)
+    conf["volume"] = pd.to_numeric(conf["volume"], errors="coerce")
+    conf["_p"] = _norm(conf["product"]) if "product" in conf.columns else ""
+    conf["fleet_max_sfl"] = conf["_p"].map(fleet)
+    conf["over_max"] = conf["fleet_max_sfl"].notna() & (conf["volume"] > conf["fleet_max_sfl"])
+    date_col = "record_collected_at" if "record_collected_at" in conf.columns else "updated_at"
+    out = pd.DataFrame({
+        "date":             conf.get(date_col),
+        "equipment_id":     conf.get("equipment_id"),
+        "product":          conf.get("product"),
+        "volume":           conf["volume"],
+        "type":             conf.get("type"),
+        "status":           conf.get("status"),
+        "fleet_max_sfl":    conf["fleet_max_sfl"],
+        "over_max":         conf["over_max"].map(lambda b: bool(b)).astype(object),
+        "field_user":       conf.get("field_user"),
+        "dispensing_point": conf.get("tank"),
+        "source_id":        conf.get("id"),
+    }, columns=CONFLICT_COLS)
+    return out.sort_values(["over_max", "volume"], ascending=[False, False]).reset_index(drop=True)
+
+
+def conflict_kpis(conf: pd.DataFrame) -> dict:
+    if conf is None or conf.empty:
+        return {"Conflictos": 0, "Sobre SFL flota": 0, "Volumen conflictivo (L)": 0.0}
+    return {
+        "Conflictos": len(conf),
+        "Sobre SFL flota": int(conf["over_max"].map(bool).sum()),
+        "Volumen conflictivo (L)": round(float(pd.to_numeric(conf["volume"], errors="coerce").sum()), 1),
+    }
+
+
+# ===========================================================================
 # KPIs y agrupaciones
 # ===========================================================================
 

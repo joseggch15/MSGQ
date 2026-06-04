@@ -497,17 +497,19 @@ class MainWindow(QMainWindow):
         self.m_mac.set_dataframe(mac)
 
         sfl_alerts = al.detect_sfl_alerts(recent, limits)
+        sfl_conflicts = al.detect_sfl_conflict_alerts(recent, limits)
         all_alerts = al.combine(
             al.detect_movement_alerts(recent),
             al.detect_adaptmac_alerts(mac),
             sfl_alerts,
+            sfl_conflicts,
         )
         self.m_alerts.set_dataframe(all_alerts)
         self.m_alert_sum.set_dataframe(al.alert_summary(all_alerts))
 
         kpis = al.compute_kpis(recent, eq, mac, all_alerts)
         self._refresh_kpis(kpis)
-        self._notify_sfl(sfl_alerts)
+        self._notify_sfl(al.combine(sfl_alerts, sfl_conflicts))
 
     def _notify_sfl(self, sfl_alerts):
         """Notificación de escritorio (toast) al detectar despachos sobre SFL nuevos.

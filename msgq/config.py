@@ -75,6 +75,11 @@ ADAPTMAC_STALE_MINUTES = 30
 # (SFL) del equipo para ese producto: un sobrellenado que no deberia ocurrir.
 ALERT_SFL_EXCEEDED = "Despacho excede Safe Fill Level"
 
+# Categoria de alerta para un despacho SIN equipo valido (status 'no_equip' o
+# tipo 'Unauthorised') cuyo volumen supera el SFL maximo de la flota para ese
+# producto: combustible despachado sin trazabilidad y por encima de lo seguro.
+ALERT_SFL_CONFLICT = "Despacho sin equipo / no autorizado"
+
 # ===========================================================================
 # Esquema canonico de columnas (contrato entre capas)
 # ===========================================================================
@@ -193,6 +198,12 @@ EQUIPMENT_STATUS_BY_ID = {
 
 # Inicio del historico al sincronizar cambios por primera vez (sin watermark).
 CHANGES_HISTORY_START = "2022-01-01T00:00:00Z"
+
+# Inicio del historico de MOVIMIENTOS en el primer arranque (sin watermark): se
+# trae todo el historial para que el software refleje el FMS y se puedan auditar
+# anomalias historicas (p. ej. un exceso de SFL de hace meses). Luego es
+# incremental por watermark. Es una carga inicial larga, una sola vez.
+MOVEMENTS_HISTORY_START = "2022-01-01T00:00:00Z"
 
 # ---------------------------------------------------------------------------
 # Reporte de instalacion de tags RFID ('Inventory Tag Installed')

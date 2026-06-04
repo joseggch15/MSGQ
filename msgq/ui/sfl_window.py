@@ -63,6 +63,8 @@ class SFLWindow(QMainWindow):
         self._limits = pd.DataFrame()
         self._exc_all = pd.DataFrame()
         self._exc = pd.DataFrame()
+        self._conf_all = pd.DataFrame()
+        self._conf = pd.DataFrame()
         self._last_counts = None
         self._loading_range = False
         self.setWindowTitle(t("MSGQ — Despachos sobre SFL  ·  Newmont Merian"))
@@ -190,6 +192,8 @@ class SFLWindow(QMainWindow):
         self.tabs.addTab(self.tbl_prod, t("Por producto"))
         self.tbl_eq, self.m_eq = make_table()
         self.tabs.addTab(self.tbl_eq, t("Por equipo"))
+        self.tbl_conf, self.m_conf = make_table()
+        self.tabs.addTab(wrap_with_search(self.tbl_conf), t("Conflictos"))
         self.tabs.addTab(self._build_charts_tab(), t("Gráficas"))
         return self.tabs
 
@@ -232,6 +236,7 @@ class SFLWindow(QMainWindow):
             self._limits = self._db.get_consumption_limits()
             self._last_counts = (len(self._movements), len(self._limits))
             self._exc_all = sa.exceedances(self._movements, self._limits)
+            self._conf_all = sa.unattributed_conflicts(self._movements, self._limits)
             self._refresh_product_combo()
             self._apply_filters()
         except Exception as exc:  # noqa: BLE001
@@ -251,32 +256,38 @@ class SFLWindow(QMainWindow):
         self.cmb_product.blockSignals(False)
 
     def _apply_filters(self):
-        """Filtra el cache de excesos por rango/producto/búsqueda (instantáneo)."""
+        """Filtra los caches (excesos y conflictos) por rango/producto/búsqueda."""
         try:
-            exc = self._exc_all
-            if exc is not None and not exc.empty:
-                d = pd.to_datetime(exc["date"], errors="coerce")
-                lo = self._ts(self.date_from.date())
-                hi = self._ts(self.date_to.date()).normalize() + pd.Timedelta(days=1)
-                exc = exc[(d >= lo) & (d < hi)]
-                prod = self.cmb_product.currentData()
-                if prod is not None:
-                    exc = exc[exc["product"].astype("string") == str(prod)]
-                txt = self.txt_search.text().strip().lower()
+            lo = self._ts(self.date_from.date())
+            hi = self._ts(self.date_to.date()).normalize() + pd.Timedelta(days=1)
+            prod = self.cmb_product.currentData()
+            txt = self.txt_search.text().strip().lower()
+
+            def _filt(df, search_cols):
+                if df is None or df.empty:
+                    return pd.DataFrame() if df is None else df
+                d = pd.to_datetime(df["date"], errors="coerce")
+                out = df[(d >= lo) & (d < hi)]
+                if prod is not None and "product" in out.columns:
+                    out = out[out["product"].astype("string") == str(prod)]
                 if txt:
-                    cols = [c for c in ("equipment_id", "equipment_description", "product") if c in exc.columns]
-                    mask = pd.Series(False, index=exc.index)
+                    cols = [c for c in search_cols if c in out.columns]
+                    mask = pd.Series(False, index=out.index)
                     for c in cols:
-                        mask |= exc[c].astype("string").str.lower().str.contains(txt, na=False)
-                    exc = exc[mask]
-            self._exc = exc if exc is not None else pd.DataFrame()
+                        mask |= out[c].astype("string").str.lower().str.contains(txt, na=False)
+                    out = out[mask]
+                return out
+
+            self._exc = _filt(self._exc_all, ("equipment_id", "equipment_description", "product"))
+            self._conf = _filt(self._conf_all, ("equipment_id", "product", "type", "status"))
 
             self.m_exc.set_dataframe(self._exc[[c for c in _DISPLAY_COLS if c in self._exc.columns]]
                                      if not self._exc.empty else self._exc)
             self.m_prod.set_dataframe(sa.by_product(self._exc))
             self.m_eq.set_dataframe(sa.by_equipment(self._exc))
+            self.m_conf.set_dataframe(self._conf)
             self._update_charts(self._exc)
-            self._set_kpis(sa.summary_kpis(self._exc, self._movements))
+            self._set_kpis(sa.summary_kpis(self._exc, self._movements), sa.conflict_kpis(self._conf))
             self._update_status()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, t("Error al filtrar"),
@@ -306,18 +317,22 @@ class SFLWindow(QMainWindow):
         else:
             self.ch_prod.set_data([], [])
 
-    def _set_kpis(self, k: dict):
+    def _set_kpis(self, k: dict, ck: dict):
         while self._kpi_layout.count():
             it = self._kpi_layout.takeAt(0)
             if it.widget():
                 it.widget().deleteLater()
         n = k.get("Excesos", 0)
+        nconf = ck.get("Conflictos", 0)
+        nover = ck.get("Sobre SFL flota", 0)
         cards = [
             warn_label(t("Excesos"), f"{n:,}", warn=n > 0),
             kpi_label(t("Exceso total (L)"), f"{k.get('Exceso total (L)', 0):,.1f}", "#C62828"),
             kpi_label(t("Peor exceso (L)"), f"{k.get('Peor exceso (L)', 0):,.1f}", "#833C00"),
             kpi_label(t("Equipos afectados"), f"{k.get('Equipos afectados', 0):,}"),
             kpi_label(t("% de despachos"), f"{k.get('% de despachos', 0):.2f}%"),
+            warn_label(t("Conflictos"), f"{nconf:,}", warn=nconf > 0),
+            warn_label(t("Sobre SFL flota"), f"{nover:,}", warn=nover > 0),
         ]
         for c in cards:
             self._kpi_layout.addWidget(c)
@@ -336,6 +351,7 @@ class SFLWindow(QMainWindow):
                            if not self._exc.empty else self._exc,
                 "Por producto": sa.by_product(self._exc),
                 "Por equipo": sa.by_equipment(self._exc),
+                "Conflictos": self._conf,
             })
             QMessageBox.information(self, t("Exportado"), f"{t('Análisis generado:')}\n{path}")
         except Exception as exc:  # noqa: BLE001

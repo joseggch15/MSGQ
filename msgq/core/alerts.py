@@ -183,6 +183,36 @@ def detect_sfl_alerts(mv: pd.DataFrame, limits: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=ALERT_COLS).reset_index(drop=True)
 
 
+def detect_sfl_conflict_alerts(mv: pd.DataFrame, limits: pd.DataFrame) -> pd.DataFrame:
+    """Alertas CRITICAS por despachos SIN equipo valido (no_equip / Unauthorised)
+    cuyo volumen supera el SFL maximo de la flota para ese producto: combustible
+    sin trazabilidad y por encima de lo seguro para cualquier equipo. Los demas
+    no_equip/Unauthorised ya los marca `_anomalous_type`, no se duplican."""
+    conf = sfl_audit.unattributed_conflicts(mv, limits)
+    if conf is None or conf.empty:
+        return _empty_alerts()
+    conf = conf[conf["over_max"].map(bool)]
+    if conf.empty:
+        return _empty_alerts()
+    rows = []
+    for _, r in conf.iterrows():
+        rows.append({
+            "timestamp": r.get("date"),
+            "severity": SEV_CRITICAL,
+            "category": config.ALERT_SFL_CONFLICT,
+            "equipment_id": r.get("equipment_id"),
+            "equipment_description": None,
+            "type": r.get("type") or config.KIND_DISPENSE,
+            "volume": r.get("volume"),
+            "detail": tr_fmt("alert.sfl_conflict",
+                             volume=float(r.get("volume") or 0.0),
+                             product=r.get("product") or "",
+                             fleet_max=float(r.get("fleet_max_sfl") or 0.0)),
+            "source_id": r.get("source_id"),
+        })
+    return pd.DataFrame(rows, columns=ALERT_COLS).reset_index(drop=True)
+
+
 # ===========================================================================
 # Detector sobre consolas AdaptMAC
 # ===========================================================================

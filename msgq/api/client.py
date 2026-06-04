@@ -188,6 +188,33 @@ class AdaptIQClient:
             out.extend(nodes)
         return out
 
+    async def fetch_movements_paged(self, updated_from: datetime | None, on_page) -> None:
+        """Pagina las 3 conexiones de movimientos llamando `on_page(nodes)` por
+        pagina (ingesta progresiva). Se usa para el backfill historico del primer
+        arranque sin acumular todo en memoria. Cada node se etiqueta con `kind`."""
+        site_id = await self._resolve_site_id()
+        filt = {"updatedFrom": _iso(updated_from)} if updated_from else {}
+        for connection, (query, kind) in queries.MOVEMENT_CONNECTIONS.items():
+            cursor: str | None = None
+            for _ in range(1_000_000):  # cota de seguridad
+                page_vars: dict[str, Any] = {
+                    "siteId": site_id, "filter": filt, "first": self._settings.page_size}
+                if cursor:
+                    page_vars["after"] = cursor
+                data = await self._execute(query, page_vars)
+                conn = ((data.get("site") or {}).get(connection)) or {}
+                nodes = [e["node"] for e in conn.get("edges", []) if e.get("node")]
+                for n in nodes:
+                    n["kind"] = kind
+                if nodes:
+                    on_page(nodes)
+                page_info = conn.get("pageInfo") or {}
+                if not page_info.get("hasNextPage"):
+                    break
+                cursor = page_info.get("endCursor")
+                if not cursor:
+                    break
+
     async def fetch_equipment(self, updated_from: datetime | None) -> list[dict]:
         site_id = await self._resolve_site_id()
         field = await self._discover_equipment_field()
