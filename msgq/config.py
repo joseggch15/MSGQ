@@ -71,6 +71,10 @@ SERVICE_TRUCK_BYPASS_VOLUME_L = 24_000.0
 # reporta como "stale" aunque el flag `online` siga en verdadero.
 ADAPTMAC_STALE_MINUTES = 30
 
+# Categoria de alerta para un despacho cuyo volumen excede el Safe Fill Level
+# (SFL) del equipo para ese producto: un sobrellenado que no deberia ocurrir.
+ALERT_SFL_EXCEEDED = "Despacho excede Safe Fill Level"
+
 # ===========================================================================
 # Esquema canonico de columnas (contrato entre capas)
 # ===========================================================================
@@ -126,6 +130,19 @@ TANK_COLS = [
     "capacity", "volume_unit", "enabled", "parent_tank", "tank_type",
 ]
 
+# Historial de asignaciones de tag RFID -> equipo, acumulado por el poller en
+# cada refresco del maestro. Permite resolver a que equipo pertenecia un tag
+# aunque luego se haya removido/reemplazado: el API NO expone ese vinculo
+# historico (el log de RFID no trae el equipo y `rfidTags` es solo valores), asi
+# que se reconstruye observando el maestro en el tiempo. `tag` (mayusculas) = PK.
+RFID_HISTORY_COLS = ["tag", "equipment_id", "internal_id", "last_seen"]
+
+# Limite de combustible/producto por equipo: el Safe Fill Level (SFL) es el
+# maximo seguro a despachar en UN repostaje. Viene de `EquipmentItem.consumptionTanks`
+# (validado en vivo: `ConsumptionTank{id, sfl, product{code description}}`). `id` =
+# ConsumptionTank id (PK); `product` = description (llave de cruce con el despacho).
+CONSUMPTION_LIMIT_COLS = ["id", "equipment_id", "internal_id", "product", "product_code", "sfl"]
+
 # Una reconciliacion diaria por tanque (el reporte 'Detailed Reconciliation' que
 # AdaptIQ pre-calcula): stock medido (opening/closing) vs movimiento
 # (inflow/outflow). `error` = (closing-opening) - (inflow-outflow), tal cual lo
@@ -176,6 +193,29 @@ EQUIPMENT_STATUS_BY_ID = {
 
 # Inicio del historico al sincronizar cambios por primera vez (sin watermark).
 CHANGES_HISTORY_START = "2022-01-01T00:00:00Z"
+
+# ---------------------------------------------------------------------------
+# Reporte de instalacion de tags RFID ('Inventory Tag Installed')
+# ---------------------------------------------------------------------------
+# Tipos de operacion del reporte semanal — vocabulario exacto que entrega
+# `Inventory_Equipment`. Se derivan del evento del log de auditoria de RFID:
+#   create  (None -> tag)  -> NEW INSTALLATION
+#   update  (tag  -> tag') -> REPLACEMENT
+#   destroy (tag  -> None) -> REMOVAL
+# No se traducen (son la jerga del reporte, igual que los estados FMS).
+TYPE_NEW         = "NEW INSTALLATION"
+TYPE_REPLACEMENT = "REPLACEMENT"
+TYPE_REMOVAL     = "REMOVAL"
+
+# Esquema exacto del reporte semanal de instalaciones (orden de columnas del
+# archivo 'Inventory Tag Installed *.xlsx'). DATE = fecha REAL del cambio
+# (changedAt del log), no la fecha del inventario.
+WEEKLY_REPORT_COLS = ["TYPE", "DATE", "ID", "Tag", "Cost Center", "Department", "Product"]
+
+# Marcador para el ID de una fila cuyo equipo no se pudo identificar (el tag ya
+# no esta en el maestro ni en el historial de asignaciones). Se muestra en vez de
+# dejar el ID en blanco, para no confundir.
+UNIDENTIFIED = "(no identificado)"
 
 # ===========================================================================
 # Configuracion de conexion

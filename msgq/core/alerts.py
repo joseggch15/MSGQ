@@ -20,6 +20,7 @@ from __future__ import annotations
 import pandas as pd
 
 from msgq import config
+from msgq.core import sfl_audit
 from msgq.i18n import tr_fmt
 
 # --- Severidades -----------------------------------------------------------
@@ -150,6 +151,36 @@ def _row(r: pd.Series, severity: str, category: str, detail: str) -> dict:
         "detail": detail,
         "source_id": r.get("id"),
     }
+
+
+# ===========================================================================
+# Detector sobre el Safe Fill Level (SFL)
+# ===========================================================================
+
+def detect_sfl_alerts(mv: pd.DataFrame, limits: pd.DataFrame) -> pd.DataFrame:
+    """Alertas CRITICAS por despachos cuyo volumen excede el Safe Fill Level del
+    equipo para ese producto (sobrellenado). Reutiliza `sfl_audit.exceedances`."""
+    exc = sfl_audit.exceedances(mv, limits)
+    if exc is None or exc.empty:
+        return _empty_alerts()
+    rows = []
+    for _, r in exc.iterrows():
+        rows.append({
+            "timestamp": r.get("date"),
+            "severity": SEV_CRITICAL,
+            "category": config.ALERT_SFL_EXCEEDED,
+            "equipment_id": r.get("equipment_id"),
+            "equipment_description": r.get("equipment_description"),
+            "type": config.KIND_DISPENSE,
+            "volume": r.get("volume"),
+            "detail": tr_fmt("alert.sfl_exceedance",
+                             volume=float(r.get("volume") or 0.0),
+                             sfl=float(r.get("sfl") or 0.0),
+                             product=r.get("product") or "",
+                             excess=float(r.get("excess") or 0.0)),
+            "source_id": r.get("source_id"),
+        })
+    return pd.DataFrame(rows, columns=ALERT_COLS).reset_index(drop=True)
 
 
 # ===========================================================================

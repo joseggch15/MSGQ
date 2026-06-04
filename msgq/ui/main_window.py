@@ -24,7 +24,7 @@ from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
-    QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QSpinBox, QStyle, QSystemTrayIcon, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from msgq.config import Settings, load_embedded_settings
@@ -68,6 +68,12 @@ class MainWindow(QMainWindow):
         self._monitoring = False
         self._eq_window = None
         self._tank_window = None
+        self._inv_window = None
+        self._sfl_window = None
+        # Alarma de escritorio para despachos sobre Safe Fill Level (SFL).
+        self._tray = self._make_tray()
+        self._seen_sfl_ids: set[str] = set()
+        self._sfl_initialized = False
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(_REFRESH_MS)
@@ -124,7 +130,7 @@ class MainWindow(QMainWindow):
             self._set_inputs_enabled(not self._monitoring)
         self._last_counts = None
         self._refresh_views(force=True)
-        for child in (self._eq_window, self._tank_window):
+        for child in (self._eq_window, self._tank_window, self._inv_window, self._sfl_window):
             if child is not None and child.isVisible():
                 child.rebuild_ui()
 
@@ -213,6 +219,19 @@ class MainWindow(QMainWindow):
             "(en vivo desde el endpoint)."))
         self.btn_tanks.clicked.connect(self._on_open_tanks)
         r3.addWidget(self.btn_tanks)
+        self.btn_inventory = QPushButton(t("Inventario de tags RFID…"))
+        self.btn_inventory.setToolTip(t(
+            "Abre el reporte de instalación de tags RFID (alta/reemplazo/remoción) con "
+            "la fecha real del cambio, en vivo desde el endpoint."))
+        self.btn_inventory.clicked.connect(self._on_open_inventory)
+        r3.addWidget(self.btn_inventory)
+        self.btn_sfl = QPushButton(t("Despachos sobre SFL…"))
+        self.btn_sfl.setObjectName("danger")
+        self.btn_sfl.setToolTip(t(
+            "Audita los despachos cuyo volumen excede el Safe Fill Level del equipo "
+            "(sobrellenado), en vivo desde el endpoint."))
+        self.btn_sfl.clicked.connect(self._on_open_sfl)
+        r3.addWidget(self.btn_sfl)
         col.addLayout(r3)
         return box
 
@@ -242,6 +261,45 @@ class MainWindow(QMainWindow):
         self._tank_window = TankWindow(self._db, self)
         self._tank_window.show()
 
+    def _on_open_inventory(self):
+        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
+        try:
+            from msgq.ui.inventory_window import InventoryWindow
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self, t("Falta pyqtgraph"),
+                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
+                f"{t('Instala la dependencia: pip install pyqtgraph')}")
+            return
+        self._inv_window = InventoryWindow(self._db, self)
+        self._inv_window.show()
+
+    def _on_open_sfl(self):
+        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
+        try:
+            from msgq.ui.sfl_window import SFLWindow
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self, t("Falta pyqtgraph"),
+                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
+                f"{t('Instala la dependencia: pip install pyqtgraph')}")
+            return
+        self._sfl_window = SFLWindow(self._db, self)
+        self._sfl_window.show()
+
+    def _make_tray(self):
+        """Icono de bandeja para la alarma de escritorio (None si no hay bandeja)."""
+        try:
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                return None
+            icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
+            tray = QSystemTrayIcon(icon, self)
+            tray.setToolTip("MSGQ — Newmont Merian")
+            tray.show()
+            return tray
+        except Exception:  # noqa: BLE001
+            return None
+
     def _build_kiosk_banner(self) -> QGroupBox:
         """Banner de la version turnkey (sin token por pantalla) + acceso al análisis."""
         box = QGroupBox(t("Monitoreo en tiempo real"))
@@ -264,6 +322,13 @@ class MainWindow(QMainWindow):
         self.btn_tanks = QPushButton(t("Analizar tanques…"))
         self.btn_tanks.clicked.connect(self._on_open_tanks)
         row.addWidget(self.btn_tanks)
+        self.btn_inventory = QPushButton(t("Inventario de tags RFID…"))
+        self.btn_inventory.clicked.connect(self._on_open_inventory)
+        row.addWidget(self.btn_inventory)
+        self.btn_sfl = QPushButton(t("Despachos sobre SFL…"))
+        self.btn_sfl.setObjectName("danger")
+        self.btn_sfl.clicked.connect(self._on_open_sfl)
+        row.addWidget(self.btn_sfl)
         return box
 
     def _build_kpi_strip(self) -> QFrame:
@@ -422,6 +487,7 @@ class MainWindow(QMainWindow):
             eq = self._db.get_equipment()
             mac = self._db.get_adaptmac()
             recent = self._db.recent_movements(hours=24)
+            limits = self._db.get_consumption_limits()
         except Exception as exc:  # noqa: BLE001
             self.statusBar().showMessage(f"{t('Error leyendo la replica')}: {exc}")
             return
@@ -430,15 +496,46 @@ class MainWindow(QMainWindow):
         self.m_eq.set_dataframe(eq)
         self.m_mac.set_dataframe(mac)
 
+        sfl_alerts = al.detect_sfl_alerts(recent, limits)
         all_alerts = al.combine(
             al.detect_movement_alerts(recent),
             al.detect_adaptmac_alerts(mac),
+            sfl_alerts,
         )
         self.m_alerts.set_dataframe(all_alerts)
         self.m_alert_sum.set_dataframe(al.alert_summary(all_alerts))
 
         kpis = al.compute_kpis(recent, eq, mac, all_alerts)
         self._refresh_kpis(kpis)
+        self._notify_sfl(sfl_alerts)
+
+    def _notify_sfl(self, sfl_alerts):
+        """Notificación de escritorio (toast) al detectar despachos sobre SFL nuevos.
+        En la primera carga solo memoriza los existentes (no notifica el histórico)."""
+        if self._tray is None:
+            return
+        ids = (set() if sfl_alerts is None or sfl_alerts.empty
+               else set(sfl_alerts["source_id"].dropna().astype(str)))
+        if not self._sfl_initialized:
+            self._seen_sfl_ids = ids
+            self._sfl_initialized = True
+            return
+        new = ids - self._seen_sfl_ids
+        self._seen_sfl_ids |= ids
+        if not new:
+            return
+        new_alerts = sfl_alerts[sfl_alerts["source_id"].astype(str).isin(new)]
+        if new_alerts.empty:
+            return
+        n = len(new_alerts)
+        detail = str(new_alerts.iloc[0].get("detail") or "")
+        msg = (f"{n} {t('despachos sobre SFL nuevos')} — {detail}" if n > 1 else detail)
+        try:
+            self._tray.showMessage(
+                t("Alarma: despacho sobre Safe Fill Level"), msg,
+                QSystemTrayIcon.Critical, 10000)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _refresh_kpis(self, k: dict):
         while self._kpi_layout.count():

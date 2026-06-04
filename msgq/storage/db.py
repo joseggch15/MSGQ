@@ -36,6 +36,8 @@ _NUMERIC = {
     "change_events": set(),
     "tanks": {"capacity"},
     "reconciliations": {"opening_stock", "closing_stock", "inflow", "outflow", "error"},
+    "rfid_history": set(),
+    "consumption_limits": {"sfl"},
 }
 _DATETIME = {
     "movements": {"record_collected_at", "created_at", "updated_at"},
@@ -44,6 +46,8 @@ _DATETIME = {
     "change_events": {"changed_at"},
     "tanks": set(),
     "reconciliations": {"period_start", "period_end", "updated_at"},
+    "rfid_history": {"last_seen"},
+    "consumption_limits": set(),
 }
 _BOOL = {
     "movements": {"is_service_truck"},
@@ -53,6 +57,8 @@ _BOOL = {
     "change_events": set(),
     "tanks": {"virtual", "enabled"},
     "reconciliations": set(),
+    "rfid_history": set(),
+    "consumption_limits": set(),
 }
 
 # Metadatos por entidad: (tabla, columnas, clave primaria).
@@ -63,6 +69,8 @@ _ENTITIES = {
     "change_events": (config.CHANGE_EVENT_COLS, "event_key"),
     "tanks": (config.TANK_COLS, "tank_id"),
     "reconciliations": (config.RECONCILIATION_COLS, "id"),
+    "rfid_history": (config.RFID_HISTORY_COLS, "tag"),
+    "consumption_limits": (config.CONSUMPTION_LIMIT_COLS, "id"),
 }
 
 # Columna temporal de cada entidad (para indice y watermark). None = sin tiempo.
@@ -70,6 +78,7 @@ _TS_COL = {
     "movements": "updated_at", "equipment": "updated_at",
     "adaptmac": "updated_at", "change_events": "changed_at",
     "tanks": None, "reconciliations": "updated_at",
+    "rfid_history": "last_seen", "consumption_limits": None,
 }
 
 
@@ -220,6 +229,12 @@ class Database:
 
     def get_reconciliations(self) -> pd.DataFrame:
         return self.read("reconciliations", order_by='"period_end" DESC')
+
+    def get_rfid_history(self) -> pd.DataFrame:
+        return self.read("rfid_history", order_by='"tag"')
+
+    def get_consumption_limits(self) -> pd.DataFrame:
+        return self.read("consumption_limits", order_by='"equipment_id"')
 
     def row_count(self, entity: str) -> int:
         with self._lock:

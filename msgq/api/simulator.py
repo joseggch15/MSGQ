@@ -179,6 +179,12 @@ class SimulatorSource:
             })
         for idx, item in enumerate(fleet, start=1):
             item["internal_id"] = str(idx)   # id numerico interno (== recordId)
+            # Tag RFID estable por equipo: el mismo valor que veran `rfidTags` y el
+            # log de cambios, para que el enlace por valor del modulo de inventario
+            # de tags funcione tambien en modo demo (en vivo el enlace es por valor).
+            item["rfid_tag"] = f"E280{rng.randint(10**11, 10**12 - 1)}"
+            # Safe Fill Level del producto principal (para auditar sobrellenados).
+            item["sfl"] = 600.0 if item["product"] == "UNLEADED" else 1893.0
         return fleet
 
     def _equipment_node(self, e: dict) -> dict:
@@ -204,7 +210,15 @@ class SimulatorSource:
             "serviceInterval": 10000 if light else 250,
             "serviceIntervalType": e["interval_type"],
             "smuValueSource": "adaptsmu",
-            "rfidTags": [f"E280{rng.randint(10**11, 10**12 - 1)}"],
+            "rfidTags": [e["rfid_tag"]],
+            "consumptionTanks": [
+                {"id": f"CT-{e['internal_id']}-main", "sfl": f"{e['sfl']:.0f}",
+                 "product": {"code": e["product"], "description": e["product"].title()}},
+                {"id": f"CT-{e['internal_id']}-oil", "sfl": "204",
+                 "product": {"code": "15W40", "description": "15W40"}},
+                {"id": f"CT-{e['internal_id']}-cool", "sfl": "379",
+                 "product": {"code": "Coolant", "description": "Coolant"}},
+            ],
             "projectCode": "P-MIN" if e["is_service_truck"] else rng.choice(["P-MIN", "P-CIV", None]),
             "sap": f"MP-{e['equipment_id']}",
             "orderNumber": None,
@@ -256,18 +270,32 @@ class SimulatorSource:
                                      "update", rng.choice(self._EMAILS),
                                      "equipment_status_id", cur, nxt))
                 cur = nxt
-        # RFID: alta de tag + cambios posteriores en algunos.
+        # RFID: alta de tag (y, en algunos, un reemplazo posterior). El valor
+        # VIGENTE coincide con `rfidTags` del equipo (e["rfid_tag"]) para que el
+        # enlace por valor del modulo de inventario funcione en modo demo.
         for i in range(1, 26):
-            when = now - timedelta(days=rng.randint(10, 179))
-            tag = f"56B{rng.randint(0x10000, 0xFFFFF):05X}"
-            log.append(self._chg(when, "EquipmentRfid", str(i), "create",
-                                 rng.choice(self._EMAILS), "rfid", None, tag))
-            if rng.random() < 0.35:
-                when2 = when + timedelta(days=rng.randint(5, 60))
-                if when2 < now:
-                    log.append(self._chg(when2, "EquipmentRfid", str(i), "update",
-                                         rng.choice(self._EMAILS), "rfid", tag,
-                                         f"56B{rng.randint(0x10000, 0xFFFFF):05X}"))
+            stable = self._fleet[i - 1]["rfid_tag"]
+            if rng.random() < 0.30:
+                # re-tagueo: alta con un tag viejo, reemplazado luego por el vigente.
+                old = f"56B{rng.randint(0x10000, 0xFFFFF):05X}"
+                when = now - timedelta(days=rng.randint(60, 179))
+                log.append(self._chg(when, "EquipmentRfid", str(i), "create",
+                                     rng.choice(self._EMAILS), "rfid", None, old))
+                when2 = when + timedelta(days=rng.randint(10, 40))
+                log.append(self._chg(when2, "EquipmentRfid", str(i), "update",
+                                     rng.choice(self._EMAILS), "rfid", old, stable))
+            else:
+                when = now - timedelta(days=rng.randint(3, 179))
+                log.append(self._chg(when, "EquipmentRfid", str(i), "create",
+                                     rng.choice(self._EMAILS), "rfid", None, stable))
+        # Algunas remociones: el tag se quito y ya no esta en ningun equipo, asi
+        # que el modulo de inventario las muestra como REMOVAL sin equipo (igual
+        # que en vivo: un tag removido no es enlazable a su equipo por valor).
+        for j in range(3):
+            when = now - timedelta(days=rng.randint(20, 160))
+            removed = f"56B{rng.randint(0x10000, 0xFFFFF):05X}"
+            log.append(self._chg(when, "EquipmentRfid", str(300 + j), "destroy",
+                                 rng.choice(self._EMAILS), "rfid", removed, None))
         # Reasignaciones de cost centre y grupo en algunos equipos.
         for e in rng.sample(self._fleet, min(10, len(self._fleet))):
             for _ in range(rng.randint(1, 2)):
@@ -378,8 +406,12 @@ class SimulatorSource:
             volume = rng.uniform(15000, 35000)
         elif kind == KIND_TRANSFER:
             volume = rng.uniform(2000, 24000)
-        else:
-            volume = rng.uniform(50, 1800)
+        else:  # DISPENSE: ~6% sobrellenado (excede el SFL del equipo); el resto bajo.
+            sfl = e.get("sfl", 1893.0)
+            if rng.random() < 0.06:
+                volume = sfl * rng.uniform(1.05, 1.4)
+            else:
+                volume = rng.uniform(50, sfl * 0.95)
 
         # Contaminacion: casi siempre limpia, a veces un pico.
         if rng.random() < 0.12:

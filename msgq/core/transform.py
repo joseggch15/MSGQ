@@ -278,6 +278,60 @@ def reconciliations_to_df(nodes: list[dict]) -> pd.DataFrame:
     return _build_df(rows, config.RECONCILIATION_COLS, _RECON_NUMERIC, _RECON_DATETIME)
 
 
+def consumption_limits_to_df(nodes: list[dict]) -> pd.DataFrame:
+    """Aplana los `consumptionTanks` de cada EquipmentItem a UNA fila por
+    (equipo, producto) con su Safe Fill Level. `product` = description (la misma
+    etiqueta que `_label` pone en el despacho, para poder cruzarlos). Descarta los
+    tanques sin `sfl` (no hay limite definido -> nada que auditar)."""
+    rows: list[dict] = []
+    for n in nodes:
+        eq_id = n.get("equipmentId")
+        internal = n.get("id")
+        for ct in (n.get("consumptionTanks") or []):
+            if ct.get("sfl") in (None, ""):
+                continue
+            prod = ct.get("product") or {}
+            rows.append({
+                "id":           ct.get("id"),
+                "equipment_id": eq_id,
+                "internal_id":  internal,
+                "product":      _label(prod),
+                "product_code": prod.get("code") if isinstance(prod, dict) else None,
+                "sfl":          ct.get("sfl"),
+            })
+    return _build_df(rows, config.CONSUMPTION_LIMIT_COLS, ["sfl"])
+
+
+def rfid_assignments_df(equipment: pd.DataFrame, when) -> pd.DataFrame:
+    """Aplana el maestro a UNA fila por (tag, equipo) para el historial de
+    asignaciones RFID: `tag` (mayusculas), `equipment_id`, `internal_id`,
+    `last_seen` = `when`. El campo `rfid` del maestro viene unido por ", "
+    (ver `_join_rfids`); aqui se reparte en tags individuales. Vacio si el
+    maestro no trae equipos o tags.
+    """
+    rows: list[dict] = []
+    if equipment is not None and not equipment.empty and "rfid" in equipment.columns:
+        ts = pd.Timestamp(when).isoformat()
+        for _, e in equipment.iterrows():
+            raw = e.get("rfid")
+            try:
+                blank = raw is None or pd.isna(raw)
+            except (TypeError, ValueError):
+                blank = False
+            if blank:
+                continue
+            for tag in str(raw).split(","):
+                tag = tag.strip()
+                if tag and tag.lower() not in ("<na>", "nan"):
+                    rows.append({
+                        "tag": tag.upper(),
+                        "equipment_id": e.get("equipment_id"),
+                        "internal_id": e.get("internal_id"),
+                        "last_seen": ts,
+                    })
+    return _build_df(rows, config.RFID_HISTORY_COLS, None, ["last_seen"])
+
+
 # ===========================================================================
 # Log de auditoria: una fila por atributo cambiado
 # ===========================================================================

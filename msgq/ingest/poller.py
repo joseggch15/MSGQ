@@ -99,8 +99,10 @@ class Poller(QThread):
 
         every = max(1, self._settings.slow_refresh_cycles)
         if cycle_index % every == 0:
-            stats["equipment"] = await self._sync_master(
-                source, "equipment", "fetch_equipment", transform.equipment_to_df)
+            eq_n, cl_n = await self._sync_equipment(source)
+            stats["equipment"] = eq_n
+            stats["consumption_limits"] = cl_n
+            stats["rfid_history"] = self._record_rfid_history()
             stats["adaptmac"] = await self._sync_master(
                 source, "adaptmac", "fetch_adaptmacs", transform.adaptmacs_to_df)
             stats["tanks"] = await self._sync_master(
@@ -176,8 +178,23 @@ class Poller(QThread):
                 "movements", max(new_wm, watermark) if watermark else new_wm)
         return n
 
+    async def _sync_equipment(self, source) -> tuple[int, int]:
+        """Refresca el maestro de equipos y, de los MISMOS nodes (una sola query),
+        el limite de combustible por equipo/producto (Safe Fill Level, de
+        `consumptionTanks`). Devuelve (filas_equipo, filas_limite)."""
+        nodes = await source.fetch_equipment(None)
+        eq_df = transform.equipment_to_df(nodes)
+        n_eq = self._db.upsert("equipment", eq_df)
+        new_wm = self._max_updated(eq_df)
+        if new_wm is not None:
+            wm = self._db.get_watermark("equipment")
+            self._db.set_watermark("equipment", max(new_wm, wm) if wm else new_wm)
+        n_cl = self._db.upsert(
+            "consumption_limits", transform.consumption_limits_to_df(nodes))
+        return n_eq, n_cl
+
     async def _sync_master(self, source, entity: str, method: str, to_df) -> int:
-        """Refresco completo de un dato maestro (equipos / consolas)."""
+        """Refresco completo de un dato maestro (consolas / tanques)."""
         df = to_df(await getattr(source, method)(None))
         n = self._db.upsert(entity, df)
         new_wm = self._max_updated(df)
@@ -185,6 +202,16 @@ class Poller(QThread):
             wm = self._db.get_watermark(entity)
             self._db.set_watermark(entity, max(new_wm, wm) if wm else new_wm)
         return n
+
+    def _record_rfid_history(self) -> int:
+        """Observa el maestro vigente y acumula el historial tag->equipo. Permite
+        al modulo de inventario de tags resolver a que equipo pertenecia un tag
+        aunque luego se remueva/reemplace (el API no expone ese vinculo). Cada tag
+        actual se reinserta con `last_seen=ahora`; los tags ya removidos conservan
+        su ultima observacion (no se vuelven a ver, no se borran)."""
+        eq = self._db.get_equipment()
+        df = transform.rfid_assignments_df(eq, datetime.now())
+        return self._db.upsert("rfid_history", df)
 
     @staticmethod
     def _max_updated(df: pd.DataFrame) -> datetime | None:

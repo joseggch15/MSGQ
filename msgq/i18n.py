@@ -121,6 +121,12 @@ _RAW: dict[str, tuple[str, str]] = {
     "severity": ("Severidad", "Severity"),
     "detail": ("Detalle", "Detail"),
     "source_id": ("ID origen", "Source ID"),
+    # --- auditoria de Safe Fill Level ---
+    "date": ("Fecha", "Date"),
+    "sfl": ("SFL", "SFL"),
+    "excess": ("Exceso (L)", "Excess (L)"),
+    "excess_pct": ("Exceso %", "Excess %"),
+    "dispensing_point": ("Punto de despacho", "Dispensing point"),
 }
 
 _ES: dict[str, str] = {k: es for k, (es, _en) in _RAW.items()}
@@ -430,12 +436,118 @@ _EN.update({
     "Volumen despachado (L)": "Dispensed volume (L)",
 })
 
+# --- Módulo de Inventario de Tags RFID ('Inventory Tag Installed') ----------
+_EN.update({
+    "MSGQ — Inventario de Tags RFID  ·  Newmont Merian":
+        "MSGQ — RFID Tag Inventory  ·  Newmont Merian",
+    # botón en la ventana principal
+    "Inventario de tags RFID…": "RFID tag inventory…",
+    "Abre el reporte de instalación de tags RFID (alta/reemplazo/remoción) con "
+    "la fecha real del cambio, en vivo desde el endpoint.":
+        "Opens the RFID tag installation report (new/replacement/removal) with the "
+        "real change date, live from the endpoint.",
+    # controles
+    "Reporte de instalación de tags RFID (fecha real del cambio)":
+        "RFID tag installation report (real change date)",
+    "Desde:": "From:",
+    "Hasta:": "To:",
+    "Exportar reporte semanal…": "Export weekly report…",
+    "Exportar análisis completo…": "Export full analysis…",
+    # pestañas
+    "Reporte semanal": "Weekly report",
+    "Inventario actual": "Current inventory",
+    "Por cost center": "By cost center",
+    "Por categoría": "By category",
+    "Validaciones": "Validations",
+    "Tags duplicados": "Duplicate tags",
+    "IDs duplicados": "Duplicate IDs",
+    "Registros incompletos": "Incomplete records",
+    "Doble clic en una fila para ver el <b>Audit Log</b> del equipo.":
+        "Double-click a row to see the equipment's <b>Audit Log</b>.",
+    # KPIs
+    "Nuevas instalaciones": "New installations",
+    "Reemplazos": "Replacements",
+    "Remociones": "Removals",
+    "Tags distintos": "Distinct tags",
+    "Con RFID": "With RFID",
+    "OOS con tag": "OOS with tag",
+    "Sin equipo": "No equipment",
+    # gráficas
+    "Eventos de RFID por mes (alta / reemplazo / remoción)":
+        "RFID events per month (new / replacement / removal)",
+    "Cambios por tipo de operación": "Changes by operation type",
+    # barra de estado
+    "Cargando historial de cambios desde el endpoint…":
+        "Loading change history from the endpoint…",
+    "cambios de RFID en el rango": "RFID changes in range",
+    "equipos en el maestro": "equipment in master",
+    # diálogos / export
+    "Esta fila no tiene un equipo identificado (remoción o tag no "
+    "encontrado en el maestro), así que no hay Audit Log que mostrar.":
+        "This row has no identified equipment (removal or tag not found in the "
+        "master), so there is no Audit Log to show.",
+    "Exportar reporte semanal": "Export weekly report",
+    "Exportar análisis completo": "Export full analysis",
+    "Reporte generado:": "Report generated:",
+    "Inventario_RFID_MSGQ.xlsx": "RFID_Inventory_MSGQ.xlsx",
+    # nombres de hoja de export
+    "Resumen validacion": "Validation summary",
+    "Por tipo": "By type",
+    # encabezados analíticos del reporte (columnas en español canónico)
+    "Instalaciones": "Installations",
+    "Nuevas": "New",
+    "Tipo de operacion": "Operation type",
+    "Cantidad": "Count",
+    "Validacion": "Validation",
+    "Anomalias": "Anomalies",
+    "Descripcion": "Description",
+    "Equipos con este tag": "Equipment with this tag",
+    "Ocurrencias": "Occurrences",
+    # placeholder
+    "(no identificado)": "(unidentified)",
+})
+
+# --- Módulo de auditoría Safe Fill Level (SFL) ------------------------------
+_EN.update({
+    "MSGQ — Despachos sobre SFL  ·  Newmont Merian":
+        "MSGQ — Dispenses over SFL  ·  Newmont Merian",
+    "Despachos sobre SFL…": "Dispenses over SFL…",
+    "Audita los despachos cuyo volumen excede el Safe Fill Level del equipo "
+    "(sobrellenado), en vivo desde el endpoint.":
+        "Audits dispenses whose volume exceeds the equipment's Safe Fill Level "
+        "(overfill), live from the endpoint.",
+    "Auditoría de Safe Fill Level (SFL)": "Safe Fill Level (SFL) audit",
+    "Producto:": "Product:",
+    "Equipo:": "Equipment:",
+    # pestañas
+    "Excesos": "Exceedances",
+    "Por equipo": "By equipment",
+    # KPIs / encabezados analíticos
+    "Exceso total (L)": "Total excess (L)",
+    "Peor exceso (L)": "Worst excess (L)",
+    "Equipos afectados": "Affected equipment",
+    "% de despachos": "% of dispenses",
+    # gráficas
+    "Excesos de SFL por mes": "SFL exceedances per month",
+    "Excesos por producto": "Exceedances by product",
+    # estado / export
+    "Sin despachos sobre SFL en el rango.": "No dispenses over SFL in range.",
+    "despachos sobre SFL en el rango": "dispenses over SFL in range",
+    # alarma de escritorio
+    "Alarma: despacho sobre Safe Fill Level": "Alarm: dispense over Safe Fill Level",
+    "despachos sobre SFL nuevos": "new dispenses over SFL",
+    "Exportar auditoría SFL": "Export SFL audit",
+    "SFL_Auditoria_MSGQ.xlsx": "SFL_Audit_MSGQ.xlsx",
+    # categoría de alerta (valor de celda en español canónico)
+    "Despacho excede Safe Fill Level": "Dispense exceeds Safe Fill Level",
+})
+
 # ===========================================================================
 # Valores de celda traducibles (lista blanca) — nunca toca datos reales
 # ===========================================================================
 _VALUE_TOKENS = frozenset({
     "Si", "No",
-    "(sin dato)", "(alta)", "(desconocido)",
+    "(sin dato)", "(alta)", "(desconocido)", "(no identificado)",
     "Asignado", "Cambiado", "Removido",
     "CRITICAL", "WARNING", "INFO",
     # etiquetas de atributos (columna "Atributo")
@@ -447,6 +559,7 @@ _VALUE_TOKENS = frozenset({
     "Modo de transaccion anomalo", "Despacho a equipo no operativo",
     "Contaminacion de combustible alta", "Service truck en bypass (volumen acumulado)",
     "Consola en modo bypass", "Consola offline", "Comunicacion stale",
+    "Despacho excede Safe Fill Level",
 })
 
 # ===========================================================================
@@ -474,6 +587,9 @@ _TPL: dict[str, tuple[str, str]] = {
     "alert.mac_stale": (
         "AdaptMAC {code} sin comms exitosa hace {mins} min",
         "AdaptMAC {code} with no successful comms for {mins} min"),
+    "alert.sfl_exceedance": (
+        "Despacho de {volume:,.0f} L excede el SFL de {sfl:,.0f} L ({product}) por {excess:,.0f} L",
+        "Dispense of {volume:,.0f} L exceeds the SFL of {sfl:,.0f} L ({product}) by {excess:,.0f} L"),
     "import.success": (
         "Se cargaron {n:,} equipos desde:\n{file}\n\n"
         "Sugerencia: deja el «Modo demo» apagado para que el simulador no "

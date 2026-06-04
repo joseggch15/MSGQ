@@ -231,6 +231,7 @@ query EquipmentItems($siteId: ID!, $first: Int, $after: String) {{
         volumeUnit
         expiryDate
         lastChangedAt
+        consumptionTanks {{ id sfl product {{ code description }} }}
         equipmentGroup {{ code description }}
         equipmentCategory {{ code description }}
         costCentre {{ code description }}
