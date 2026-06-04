@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QStyle, QSystemTrayIcon, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from msgq.config import Settings, load_embedded_settings
+from msgq.config import Settings, load_embedded_settings, demo_db_path, DEFAULT_DB_PATH
 from msgq.core import alerts as al
 from msgq.i18n import LANGUAGES, current_language, set_language, t, tr_fmt
 from msgq.ingest import Poller
@@ -63,7 +63,11 @@ class MainWindow(QMainWindow):
         embedded = load_embedded_settings()
         self._kiosk = embedded is not None
         self._settings = embedded if embedded is not None else Settings.from_env()
-        self._db = Database(self._settings.db_path)
+        # Replica separado por modo: demo usa otro archivo para NUNCA contaminar
+        # los datos reales (evita falsos positivos en la auditoria SFL).
+        self._live_db = self._settings.db_path or DEFAULT_DB_PATH
+        self._db = Database(self._effective_db_path())
+        self._heal_replica()
         self._poller: Poller | None = None
         self._monitoring = False
         self._eq_window = None
@@ -287,6 +291,23 @@ class MainWindow(QMainWindow):
         self._sfl_window = SFLWindow(self._db, self)
         self._sfl_window.show()
 
+    def _effective_db_path(self) -> str:
+        """Ruta del replica segun el modo: demo en archivo aparte, real en el suyo."""
+        return demo_db_path(self._live_db) if self._settings.demo_mode else self._live_db
+
+    def _heal_replica(self) -> None:
+        """En modo PRODUCCION elimina movimientos del simulador que hubieran
+        quedado en el replica (datos demo que contaminaban la auditoria SFL)."""
+        if self._settings.demo_mode:
+            return
+        try:
+            n = self._db.purge_simulator_movements()
+        except Exception:  # noqa: BLE001
+            return
+        if n:
+            self.statusBar().showMessage(
+                f"{t('Datos de demo eliminados del replica de producción:')} {n:,}")
+
     def _make_tray(self):
         """Icono de bandeja para la alarma de escritorio (None si no hay bandeja)."""
         try:
@@ -401,6 +422,16 @@ class MainWindow(QMainWindow):
     def _start_monitoring(self):
         """Arranca el poller con la configuracion actual (manual o embebida)."""
         self._stop_poller()  # por si habia uno corriendo
+        # El replica debe corresponder al modo (demo en archivo aparte) y, si es
+        # produccion, no debe contener datos del simulador.
+        desired = self._effective_db_path()
+        if desired != self._db.path:
+            try:
+                self._db.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._db = Database(desired)
+        self._heal_replica()
         self._poller = Poller(self._settings, self._db)
         self._poller.cycle_completed.connect(self._on_cycle)
         self._poller.status.connect(self.statusBar().showMessage)

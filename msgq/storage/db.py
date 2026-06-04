@@ -92,6 +92,10 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._create_schema()
 
+    @property
+    def path(self) -> str:
+        return self._path
+
     # -- esquema ------------------------------------------------------------
 
     def _sql_type(self, entity: str, col: str) -> str:
@@ -240,6 +244,15 @@ class Database:
         with self._lock:
             cur = self._conn.execute(f"SELECT COUNT(*) AS n FROM {entity}")
             return int(cur.fetchone()["n"])
+
+    def purge_simulator_movements(self) -> int:
+        """Borra movimientos del SIMULADOR (id 'SIM-%') que pudieran haber quedado
+        en un replica de PRODUCCION (p. ej. tras correr el modo demo sobre el mismo
+        archivo). Evita falsos positivos al auditarlos contra SFL reales. Devuelve
+        cuantas filas borro."""
+        with self._lock, self._conn:
+            cur = self._conn.execute("DELETE FROM movements WHERE id LIKE 'SIM-%'")
+            return max(0, cur.rowcount or 0)
 
     def _records_to_df(self, entity: str, rows: list[dict],
                        cols: list[str]) -> pd.DataFrame:

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
+from msgq import config
 from msgq.core import sfl_audit as sa
 from msgq.export import export_sheets
 from msgq.i18n import current_language, set_language, t
@@ -302,8 +303,10 @@ class SFLWindow(QMainWindow):
             self._refresh()
 
     def _update_status(self):
+        pct = config.SFL_TOLERANCE_PCT * 100
         self.statusBar().showMessage(
-            f"{len(self._exc):,} {t('despachos sobre SFL en el rango')} · {datetime.now():%H:%M:%S}")
+            f"{len(self._exc):,} {t('despachos sobre SFL en el rango')} · "
+            f"{t('tolerancia')} {pct:g}% · {datetime.now():%H:%M:%S}")
 
     def _update_charts(self, exc: pd.DataFrame):
         ot = sa.over_time(exc)

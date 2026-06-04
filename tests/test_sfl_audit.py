@@ -197,6 +197,45 @@ def test_detect_sfl_conflict_alerts():
     print("OK  test_detect_sfl_conflict_alerts")
 
 
+def test_sfl_tolerance_filters_meter_noise():
+    """Con tolerancia del 2%, un exceso marginal (ruido de medidor) NO se marca,
+    pero un sobrellenado real sí."""
+    lim = _lim_df([{"id": "1", "equipment_id": "FT001", "product": "Diesel", "sfl": 2000}])
+    mv = _mv_df([
+        _disp("m1", "FT001", "Diesel", 2004.6, "2026-06-03"),   # +0.23% -> ruido, NO
+        _disp("m2", "FT001", "Diesel", 2100.0, "2026-06-03"),   # +5%    -> real, SI
+    ])
+    assert abs(config.SFL_TOLERANCE_PCT - 0.02) < 1e-9
+    exc = sa.exceedances(mv, lim)
+    assert len(exc) == 1 and exc.iloc[0]["source_id"] == "m2"
+    print("OK  test_sfl_tolerance_filters_meter_noise")
+
+
+def test_demo_data_isolation_and_purge():
+    """El replica demo va en archivo aparte; y se pueden purgar movimientos del
+    simulador que hubieran quedado en un replica de produccion (la causa de los
+    falsos positivos de SFL: despachos demo cruzados con SFL reales)."""
+    from msgq.config import demo_db_path
+    assert demo_db_path("/x/msgq.sqlite3") == "/x/msgq_demo.sqlite3"
+    assert demo_db_path("").endswith("_demo.sqlite3")
+
+    db = Database(":memory:")
+    db.upsert("movements", _mv_df([
+        _disp("251025", "TFL0847", "Diesel", 367.4, "2026-06-02"),          # real
+        {"id": "SIM-00000066", "kind": config.KIND_DISPENSE, "equipment_id": "TFL0847",
+         "product": "Diesel", "volume": 1276.8},                            # simulador
+    ]))
+    lim = _lim_df([{"id": "1", "equipment_id": "TFL0847", "product": "Diesel", "sfl": 560}])
+    # Con el dato del simulador se reporta un FALSO exceso (1276.8 > 560):
+    assert len(sa.exceedances(db.read("movements"), lim)) == 1
+    # Tras purgar el dato demo, no queda exceso (el real 367.4 < 560):
+    assert db.purge_simulator_movements() == 1
+    assert db.row_count("movements") == 1
+    assert sa.exceedances(db.read("movements"), lim).empty
+    db.close()
+    print("OK  test_demo_data_isolation_and_purge")
+
+
 def test_fetch_movements_paged_parity_and_backfill():
     from PySide6.QtCore import QCoreApplication
     from msgq.ingest.poller import Poller
@@ -265,6 +304,8 @@ if __name__ == "__main__":
         test_consumption_limits_transform_and_roundtrip,
         test_unattributed_conflicts,
         test_detect_sfl_conflict_alerts,
+        test_sfl_tolerance_filters_meter_noise,
+        test_demo_data_isolation_and_purge,
         test_fetch_movements_paged_parity_and_backfill,
         test_e2e_sfl_via_simulator,
     ]

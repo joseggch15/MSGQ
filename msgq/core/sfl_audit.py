@@ -77,7 +77,11 @@ def exceedances(movements: pd.DataFrame | None,
     lim = lim.dropna(subset=["sfl"]).drop_duplicates(["_pk", "_prod"])
 
     merged = mv.merge(lim[["_pk", "_prod", "sfl"]], on=["_pk", "_prod"], how="inner")
-    merged = merged[merged["volume"].notna() & (merged["volume"] > merged["sfl"])]
+    # Tolerancia: solo cuenta como exceso si supera el SFL por mas de SFL_TOLERANCE_PCT
+    # (filtra el ruido de medicion; ver config). El `excess` reportado sigue siendo
+    # volume - sfl (el exceso real sobre el nivel seguro).
+    threshold = merged["sfl"] * (1.0 + config.SFL_TOLERANCE_PCT)
+    merged = merged[merged["volume"].notna() & (merged["volume"] > threshold)]
     if merged.empty:
         return pd.DataFrame(columns=EXCEEDANCE_COLS)
 
@@ -165,7 +169,8 @@ def unattributed_conflicts(movements: pd.DataFrame | None,
     conf["volume"] = pd.to_numeric(conf["volume"], errors="coerce")
     conf["_p"] = _norm(conf["product"]) if "product" in conf.columns else ""
     conf["fleet_max_sfl"] = conf["_p"].map(fleet)
-    conf["over_max"] = conf["fleet_max_sfl"].notna() & (conf["volume"] > conf["fleet_max_sfl"])
+    conf["over_max"] = (conf["fleet_max_sfl"].notna()
+                        & (conf["volume"] > conf["fleet_max_sfl"] * (1.0 + config.SFL_TOLERANCE_PCT)))
     date_col = "record_collected_at" if "record_collected_at" in conf.columns else "updated_at"
     out = pd.DataFrame({
         "date":             conf.get(date_col),

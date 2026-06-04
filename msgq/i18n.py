@@ -540,6 +540,7 @@ _EN.update({
     # estado / export
     "Sin despachos sobre SFL en el rango.": "No dispenses over SFL in range.",
     "despachos sobre SFL en el rango": "dispenses over SFL in range",
+    "tolerancia": "tolerance",
     # alarma de escritorio
     "Alarma: despacho sobre Safe Fill Level": "Alarm: dispense over Safe Fill Level",
     "despachos sobre SFL nuevos": "new dispenses over SFL",
@@ -547,6 +548,9 @@ _EN.update({
     "SFL_Auditoria_MSGQ.xlsx": "SFL_Audit_MSGQ.xlsx",
     # categoría de alerta (valor de celda en español canónico)
     "Despacho excede Safe Fill Level": "Dispense exceeds Safe Fill Level",
+    # integridad de datos (separación demo/real)
+    "Datos de demo eliminados del replica de producción:":
+        "Demo data removed from the production replica:",
 })
 
 # ===========================================================================

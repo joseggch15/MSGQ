@@ -75,6 +75,12 @@ ADAPTMAC_STALE_MINUTES = 30
 # (SFL) del equipo para ese producto: un sobrellenado que no deberia ocurrir.
 ALERT_SFL_EXCEEDED = "Despacho excede Safe Fill Level"
 
+# Tolerancia relativa antes de marcar un exceso de SFL: solo se reporta si
+# volume > sfl * (1 + SFL_TOLERANCE_PCT). Filtra el ruido de medicion (los
+# medidores tienen ~0.5-1% de error), para que solo se vean sobrellenados
+# REALES y no excesos marginales de decimas de litro. 0.02 = 2%.
+SFL_TOLERANCE_PCT = 0.02
+
 # Categoria de alerta para un despacho SIN equipo valido (status 'no_equip' o
 # tipo 'Unauthorised') cuyo volumen supera el SFL maximo de la flota para ese
 # producto: combustible despachado sin trazabilidad y por encima de lo seguro.
@@ -236,6 +242,16 @@ DEFAULT_ENDPOINT = "https://merian.veridapt.io/graphql"   # tenant Newmont Meria
 DEFAULT_POLL_SECONDS = 20
 DEFAULT_PAGE_SIZE = 100        # la API limita a 100 registros por pagina
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "msgq_replica.sqlite3")
+
+
+def demo_db_path(live_path: str) -> str:
+    """Ruta del replica para el modo DEMO: un archivo SEPARADO del de produccion.
+
+    Asi los datos sinteticos del simulador NUNCA se mezclan con los reales. Mezclar
+    ambos producia falsos positivos en la auditoria SFL (un despacho demo, dimensionado
+    contra un SFL ficticio, se cruzaba contra el SFL real del equipo y 'excedia')."""
+    base, ext = os.path.splitext(live_path or DEFAULT_DB_PATH)
+    return f"{base}_demo{ext or '.sqlite3'}"
 
 
 @dataclass
