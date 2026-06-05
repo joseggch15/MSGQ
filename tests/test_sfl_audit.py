@@ -110,6 +110,44 @@ def test_kpis_and_groupings():
 # 2. Alerta (alimenta el panel + KPI critico + toast)
 # ===========================================================================
 
+def test_by_field_user():
+    mv = _mv_df([
+        _disp("d1", "EQ1", "Diesel", 2000, "2026-06-01"),   # Mitchell Godet (default)
+        _disp("d2", "EQ1", "Diesel", 2100, "2026-06-02"),   # Mitchell Godet
+        {"id": "d3", "kind": config.KIND_DISPENSE, "equipment_id": "EQ1",
+         "equipment_description": "Equipo EQ1", "equipment_status": config.STATUS_IN,
+         "product": "Diesel", "volume": 2200, "tank": "LFO", "field_user": pd.NA,
+         "record_collected_at": pd.Timestamp("2026-06-03")},   # sin operador
+    ])
+    lim = _lim_df([{"id": "1", "equipment_id": "EQ1", "product": "Diesel", "sfl": 1893}])
+    exc = sa.exceedances(mv, lim)
+    bu = sa.by_field_user(exc)
+    assert list(bu.columns) == ["field_user", "Excesos", "Exceso total (L)", "Peor exceso (L)"]
+    top = bu.iloc[0]
+    assert top["field_user"] == "Mitchell Godet" and top["Excesos"] == 2
+    assert "(sin dato)" in set(bu["field_user"])   # el despacho sin operador se agrupa
+    print("OK  test_by_field_user")
+
+
+def test_load_progress():
+    win_lo, win_hi = pd.Timestamp("2022-01-01"), pd.Timestamp("2026-06-04")
+    # Sin datos: 0% si no terminó; 100% si el backfill ya está marcado.
+    assert sa.load_progress(pd.DataFrame(), win_lo, win_hi, False) == (0.0, False)
+    assert sa.load_progress(pd.DataFrame(), win_lo, win_hi, True) == (100.0, True)
+    # Solo datos recientes (3 días) sobre ~4.4 años -> porcentaje bajo, sin terminar.
+    mv = _mv_df([_disp("a", "EQ", "Diesel", 10, "2026-06-02"),
+                 _disp("b", "EQ", "Diesel", 10, "2026-06-04")])
+    pct, done = sa.load_progress(mv, win_lo, win_hi, False)
+    assert 0 < pct < 5 and done is False
+    # El dato más antiguo alcanza el inicio del rango -> 100% completo.
+    mv2 = _mv_df([_disp("c", "EQ", "Diesel", 10, "2022-01-01"),
+                  _disp("d", "EQ", "Diesel", 10, "2026-06-04")])
+    assert sa.load_progress(mv2, win_lo, win_hi, False) == (100.0, True)
+    # backfilled fuerza 100% aunque el dato más antiguo no llegue al inicio.
+    assert sa.load_progress(mv, win_lo, win_hi, True) == (100.0, True)
+    print("OK  test_load_progress")
+
+
 def test_detect_sfl_alerts():
     mv = _mv_df([_disp("d1", "EQ1", "Diesel", 2000)])
     lim = _lim_df([{"id": "1", "equipment_id": "EQ1", "product": "Diesel", "sfl": 1893}])
@@ -250,7 +288,7 @@ def test_fetch_movements_paged_parity_and_backfill():
     paged = asyncio.run(_paged())
     assert len(paged) >= 1 and all("kind" in n for n in paged)
 
-    # Backfill del primer arranque: sin watermark -> usa paged y fija watermark.
+    # Backfill del primer arranque: sin watermark -> usa paged, fija watermark y marca.
     QCoreApplication.instance() or QCoreApplication([])
     db = Database(":memory:")
     src = make_source(config.Settings(demo_mode=True, token="", db_path=":memory:"))
@@ -259,8 +297,34 @@ def test_fetch_movements_paged_parity_and_backfill():
     asyncio.run(src.aclose())
     assert n >= 1 and db.row_count("movements") >= 1
     assert db.get_watermark("movements") is not None
+    assert db.get_flag("movements_backfill_done") == "1"
     db.close()
     print("OK  test_fetch_movements_paged_parity_and_backfill")
+
+
+def test_movements_backfill_runs_despite_existing_watermark():
+    """Una replica creada con la logica vieja (ventana corta) ya tiene watermark
+    pero NO la marca de backfill: el poller debe reconstruir el historial completo
+    igualmente (la causa de que 'Todo el rango' mostrara solo datos recientes)."""
+    from datetime import datetime
+    from PySide6.QtCore import QCoreApplication
+    from msgq.ingest.poller import Poller, _MOVEMENTS_BACKFILL_FLAG
+
+    QCoreApplication.instance() or QCoreApplication([])
+    db = Database(":memory:")
+    # Simula el estado roto: watermark presente, sin marca de backfill, sin filas.
+    db.set_watermark("movements", datetime(2026, 6, 4, 21, 0, 0))
+    assert db.get_flag(_MOVEMENTS_BACKFILL_FLAG) is None
+    assert db.row_count("movements") == 0
+
+    src = make_source(config.Settings(demo_mode=True, token="", db_path=":memory:"))
+    poller = Poller(config.Settings(demo_mode=True, token="", db_path=":memory:"), db)
+    n = asyncio.run(poller._sync_movements(src))   # debe backfillear pese al watermark
+    asyncio.run(src.aclose())
+    assert n >= 1 and db.row_count("movements") >= 1
+    assert db.get_flag(_MOVEMENTS_BACKFILL_FLAG) == "1"
+    db.close()
+    print("OK  test_movements_backfill_runs_despite_existing_watermark")
 
 
 # ===========================================================================
@@ -300,6 +364,8 @@ if __name__ == "__main__":
         test_exceedances_basic,
         test_exceedances_product_case_insensitive,
         test_kpis_and_groupings,
+        test_by_field_user,
+        test_load_progress,
         test_detect_sfl_alerts,
         test_consumption_limits_transform_and_roundtrip,
         test_unattributed_conflicts,
@@ -307,6 +373,7 @@ if __name__ == "__main__":
         test_sfl_tolerance_filters_meter_noise,
         test_demo_data_isolation_and_purge,
         test_fetch_movements_paged_parity_and_backfill,
+        test_movements_backfill_runs_despite_existing_watermark,
         test_e2e_sfl_via_simulator,
     ]
     failed = 0

@@ -250,6 +250,51 @@ def by_equipment(exc: pd.DataFrame) -> pd.DataFrame:
     return g.sort_values("Excesos", ascending=False).reset_index(drop=True)[cols]
 
 
+def by_field_user(exc: pd.DataFrame) -> pd.DataFrame:
+    """Excesos agrupados por usuario de campo (operador). Sirve para auditar qué
+    operadores concentran más sobrellenados de SFL — un indicador que ayuda a
+    detectar posible sustracción de combustible. Los despachos sin operador
+    (automáticos) se agrupan bajo '(sin dato)'."""
+    cols = ["field_user", "Excesos", "Exceso total (L)", "Peor exceso (L)"]
+    if exc is None or exc.empty or "field_user" not in exc.columns:
+        return pd.DataFrame(columns=cols)
+    user = (exc["field_user"].astype("string").str.strip()
+            .replace({"": pd.NA, "<NA>": pd.NA, "nan": pd.NA}).fillna("(sin dato)"))
+    g = exc.assign(field_user=user).groupby("field_user").agg(
+        Excesos=("excess", "size"),
+        **{"Exceso total (L)": ("excess", "sum"), "Peor exceso (L)": ("excess", "max")}
+    ).reset_index()
+    g["Exceso total (L)"] = g["Exceso total (L)"].round(1)
+    g["Peor exceso (L)"] = g["Peor exceso (L)"].round(1)
+    return g.sort_values("Excesos", ascending=False).reset_index(drop=True)
+
+
+def load_progress(movements: pd.DataFrame | None, win_lo, win_hi,
+                  backfilled: bool = False) -> tuple[float, bool]:
+    """Progreso de carga del histórico DENTRO del rango [win_lo, win_hi).
+
+    Devuelve `(pct, done)`. La cobertura se mide por fecha: qué tan atrás alcanza el
+    dato más antiguo ya replicado respecto al inicio del rango elegido. Llega a 100%
+    (y `done=True`) cuando ese dato alcanza `win_lo`, o cuando el backfill histórico
+    global ya terminó (`backfilled`). Así el usuario sabe, para el rango que escogió,
+    cuánto falta y cuándo terminó por completo."""
+    win_lo = pd.Timestamp(win_lo)
+    win_hi = pd.Timestamp(win_hi)
+    span = (win_hi - win_lo).total_seconds()
+    if movements is None or movements.empty:
+        return (100.0, True) if backfilled else (0.0, False)
+    col = "record_collected_at" if "record_collected_at" in movements.columns else "updated_at"
+    d = pd.to_datetime(movements[col], errors="coerce").dropna()
+    if d.empty:
+        return (100.0, True) if backfilled else (0.0, False)
+    oldest = d.min()
+    if backfilled or span <= 0 or oldest <= win_lo:
+        return (100.0, True)
+    covered = (win_hi - oldest).total_seconds()
+    pct = max(0.0, min(100.0, covered / span * 100.0))
+    return (pct, pct >= 100.0)
+
+
 def over_time(exc: pd.DataFrame, freq: str = "ME") -> pd.DataFrame:
     cols = ["Periodo", "Excesos", "Exceso total (L)"]
     if exc is None or exc.empty:

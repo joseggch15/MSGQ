@@ -187,6 +187,19 @@ _EN.update({
     "No": "No",
     "Claro": "Light",
     "Oscuro": "Dark",
+    # --- indicador de carga (overlay / barra de estado) ---
+    "Cargando…": "Loading…",
+    "Cargando datos…": "Loading data…",
+    "Actualizando…": "Updating…",
+    # --- paginación de tablas grandes ---
+    "Filas por página:": "Rows per page:",
+    # --- indicador de progreso de carga histórica (ventana SFL) ---
+    "Carga histórica del rango:": "Range history load:",
+    "Datos completos para el rango": "Range data complete",
+    "Cargando histórico…": "Loading history…",
+    "movimientos": "movements",
+    "excesos": "exceedances",
+    "más antiguo:": "oldest:",
     # --- KPIs ventana principal ---
     "Movimientos (24h)": "Movements (24h)",
     "Volumen 24h (L)": "Volume 24h (L)",
@@ -524,6 +537,7 @@ _EN.update({
     # pestañas
     "Excesos": "Exceedances",
     "Por equipo": "By equipment",
+    "Por usuario": "By user",
     "Conflictos": "Conflicts",
     # KPIs / encabezados analíticos
     "Exceso total (L)": "Total excess (L)",
@@ -537,6 +551,7 @@ _EN.update({
     # gráficas
     "Excesos de SFL por mes": "SFL exceedances per month",
     "Excesos por producto": "Exceedances by product",
+    "Excesos por usuario de campo": "Exceedances by field user",
     # estado / export
     "Sin despachos sobre SFL en el rango.": "No dispenses over SFL in range.",
     "despachos sobre SFL en el rango": "dispenses over SFL in range",
@@ -625,6 +640,9 @@ _TPL: dict[str, tuple[str, str]] = {
     "tank.status": (
         "{recons:,} reconciliaciones · {tanks:,} tanques",
         "{recons:,} reconciliations · {tanks:,} tanks"),
+    "page.label": (
+        "Página {page:,}/{pages:,}  ·  {lo:,}–{hi:,} de {total:,}",
+        "Page {page:,}/{pages:,}  ·  {lo:,}–{hi:,} of {total:,}"),
 }
 
 

@@ -191,6 +191,29 @@ class Database:
                 (entity, wm, now),
             )
 
+    # -- banderas persistentes (one-shot) ----------------------------------
+    # Marcadores de progreso que NO son timestamps (p. ej. "el backfill historico
+    # de movimientos ya se completo"). Se guardan en la misma tabla `sync_state`
+    # bajo una `entity` propia que no colisiona con las entidades reales; el valor
+    # va en la columna `watermark` como texto libre.
+
+    def get_flag(self, name: str) -> str | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT watermark FROM sync_state WHERE entity = ?", (name,))
+            row = cur.fetchone()
+        return row["watermark"] if row and row["watermark"] is not None else None
+
+    def set_flag(self, name: str, value: str) -> None:
+        now = datetime.now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO sync_state (entity, watermark, last_run) "
+                "VALUES (?, ?, ?) ON CONFLICT(entity) DO UPDATE SET "
+                "watermark = excluded.watermark, last_run = excluded.last_run",
+                (name, value, now),
+            )
+
     # -- lectura ------------------------------------------------------------
 
     def read(self, entity: str, where: str = "", params: tuple = (),

@@ -275,8 +275,9 @@ class Settings:
     # eligiendo aquel cuyo code/description contenga `site_match`.
     site_id: str = ""
     site_match: str = "Merian"
-    # En el primer ciclo (sin watermark) solo se traen los movimientos de los
-    # ultimos N dias, para no descargar todo el historico de golpe.
+    # Vestigial: el backfill de movimientos del primer arranque va desde
+    # MOVEMENTS_HISTORY_START (historial completo), no por esta ventana. Se
+    # conserva el campo por compatibilidad de entorno; ya NO limita la carga.
     initial_lookback_days: int = 7
     # Equipos y consolas son datos maestros: se refrescan cada N ciclos, no en
     # cada poll (los movimientos si van en cada ciclo).

@@ -32,6 +32,13 @@ _WATERMARK_EPSILON = timedelta(seconds=1)
 # Primer arranque: ventana de reconciliaciones a traer (luego es incremental).
 _RECON_INITIAL_DAYS = 365
 
+# Marca persistente de que el backfill historico de movimientos ya se completo.
+# Mientras no exista, el poller reconstruye TODO el historial desde
+# `MOVEMENTS_HISTORY_START`, aunque ya haya un watermark de una sincronizacion
+# anterior de ventana corta (asi una replica creada con la logica vieja de 7 dias
+# tambien recupera el historial completo). Ver `_sync_movements`.
+_MOVEMENTS_BACKFILL_FLAG = "movements_backfill_done"
+
 
 class Poller(QThread):
     """Hilo de sincronizacion continua FMS -> SQLite."""
@@ -161,12 +168,16 @@ class Poller(QThread):
         return state["rows"]
 
     async def _sync_movements(self, source) -> int:
-        """Movimientos. Incremental por watermark; en el PRIMER arranque (sin
-        watermark) hace un backfill historico PROGRESIVO desde
-        `MOVEMENTS_HISTORY_START`, asi el software refleja el FMS y se pueden
-        auditar anomalias historicas. Upsert por pagina (idempotente)."""
+        """Movimientos. Incremental por watermark UNA VEZ que el backfill historico
+        se completo; mientras no exista esa marca hace un backfill PROGRESIVO desde
+        `MOVEMENTS_HISTORY_START`, asi el software refleja el FMS y se pueden auditar
+        anomalias historicas. La marca (no solo el watermark) es lo que decide: una
+        replica creada con la logica vieja (ventana corta) ya tiene watermark pero NO
+        la marca, por lo que tambien reconstruye todo el historial. Upsert por pagina
+        (idempotente)."""
         watermark = self._db.get_watermark("movements")
-        if watermark:
+        backfilled = self._db.get_flag(_MOVEMENTS_BACKFILL_FLAG) == "1"
+        if watermark and backfilled:
             updated_from = watermark - _WATERMARK_EPSILON
             df = transform.movements_to_df(await source.fetch_movements(updated_from))
             n = self._db.upsert("movements", df)
@@ -175,7 +186,8 @@ class Poller(QThread):
                 self._db.set_watermark("movements", max(new_wm, watermark))
             return n
 
-        # Primer arranque: backfill historico completo (carga inicial larga, 1 vez).
+        # Backfill historico completo (carga inicial larga, 1 sola vez): primer
+        # arranque, o replica previa sin la marca de backfill.
         history_from = datetime.fromisoformat(
             config.MOVEMENTS_HISTORY_START.replace("Z", ""))
         state: dict = {"rows": 0, "max_ts": None}
@@ -192,7 +204,9 @@ class Poller(QThread):
 
         await source.fetch_movements_paged(history_from, on_page)
         if state["max_ts"] is not None:
-            self._db.set_watermark("movements", state["max_ts"])
+            self._db.set_watermark(
+                "movements", max(state["max_ts"], watermark) if watermark else state["max_ts"])
+        self._db.set_flag(_MOVEMENTS_BACKFILL_FLAG, "1")
         return state["rows"]
 
     async def _sync_equipment(self, source) -> tuple[int, int]:

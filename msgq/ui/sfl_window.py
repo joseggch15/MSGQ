@@ -16,11 +16,11 @@ import traceback
 from datetime import datetime
 
 import pandas as pd
-from PySide6.QtCore import QDate, QSettings, QTimer
+from PySide6.QtCore import QDate, QSettings, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDateEdit, QFileDialog, QFrame, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
-    QTabWidget, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
+    QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from msgq import config
@@ -31,8 +31,33 @@ from msgq.storage import Database
 from msgq.ui import theme
 from msgq.ui.charts import BarChart, TimeSeriesChart
 from msgq.ui.common import (
-    kpi_label, language_selector, make_table, theme_selector, warn_label, wrap_with_search,
+    BusyOverlay, PaginatedTableView, kpi_label, language_selector, make_table,
+    theme_selector, warn_label,
 )
+
+
+class _LoadWorker(QThread):
+    """Lee la replica y recalcula TODOS los excesos/conflictos en un hilo aparte,
+    para no congelar la interfaz cuando el historial de movimientos es grande (tras
+    el backfill puede haber decenas de miles de filas). Emite los DataFrames ya
+    calculados; la GUI solo los proyecta."""
+
+    done = Signal(object, object, object, object)   # movements, limits, exc_all, conf_all
+    failed = Signal(str)
+
+    def __init__(self, db: Database, parent=None):
+        super().__init__(parent)
+        self._db = db
+
+    def run(self) -> None:  # noqa: D401 - QThread entrypoint
+        try:
+            movements = self._db.read("movements")
+            limits = self._db.get_consumption_limits()
+            exc_all = sa.exceedances(movements, limits)
+            conf_all = sa.unattributed_conflicts(movements, limits)
+            self.done.emit(movements, limits, exc_all, conf_all)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"{exc}\n\n{traceback.format_exc()}")
 
 _RANGES = (
     ("Últimos 7 días", 7),
@@ -67,7 +92,17 @@ class SFLWindow(QMainWindow):
         self._conf_all = pd.DataFrame()
         self._conf = pd.DataFrame()
         self._last_counts = None
+        self._last_backfilled = None
         self._loading_range = False
+        self._worker: _LoadWorker | None = None
+        self._pending_refresh = False
+        self._busy: BusyOverlay | None = None
+        # Debounce de la búsqueda: re-filtrar en cada tecla sobre decenas de miles
+        # de filas trababa el tipeo; se difiere 250 ms tras la última pulsación.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(self._apply_filters)
         self.setWindowTitle(t("MSGQ — Despachos sobre SFL  ·  Newmont Merian"))
         self.resize(1420, 880)
 
@@ -81,6 +116,9 @@ class SFLWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802 - override Qt
         self._timer.stop()
+        self._search_timer.stop()
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.wait(3000)
         event.accept()
 
     # --- Idioma / tema (la ventana principal es la fuente única) ------------
@@ -126,9 +164,34 @@ class SFLWindow(QMainWindow):
         lay = QVBoxLayout(root)
         lay.setSpacing(6)
         lay.addWidget(self._build_controls())
+        lay.addWidget(self._build_progress())
         lay.addWidget(self._build_kpis())
         lay.addWidget(self._build_tabs(), stretch=1)
         self.setCentralWidget(root)
+        # Indicador de carga (cubre el area central durante la lectura/recalculo).
+        self._busy = BusyOverlay(root, t("Cargando datos…"))
+
+    def _build_progress(self) -> QFrame:
+        """Barra de progreso de la carga histórica para el rango elegido. Da certeza
+        de cuándo terminó de cargarse TODA la data con conflictos de SFL del rango."""
+        frame = QFrame()
+        frame.setFrameShape(QFrame.StyledPanel)
+        frame.setStyleSheet(f"QFrame{{background:{theme.panel_bg()}; border-radius:6px;}}")
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(10, 4, 10, 4)
+        row.setSpacing(10)
+        self._prog_caption = QLabel(t("Carga histórica del rango:"))
+        self._prog_bar = QProgressBar()
+        self._prog_bar.setRange(0, 100)
+        self._prog_bar.setValue(0)
+        self._prog_bar.setTextVisible(True)
+        self._prog_bar.setFixedWidth(260)
+        self._prog_text = QLabel("")
+        self._prog_text.setStyleSheet("color:#5A6B7B;")
+        row.addWidget(self._prog_caption)
+        row.addWidget(self._prog_bar)
+        row.addWidget(self._prog_text, stretch=1)
+        return frame
 
     def _build_controls(self) -> QGroupBox:
         box = QGroupBox(t("Auditoría de Safe Fill Level (SFL)"))
@@ -154,10 +217,10 @@ class SFLWindow(QMainWindow):
 
         self.txt_search = QLineEdit()
         self.txt_search.setPlaceholderText(t("Buscar por ID, descripción, marca, modelo..."))
-        self.txt_search.textChanged.connect(self._apply_filters)
+        self.txt_search.textChanged.connect(lambda _t: self._search_timer.start())
 
         btn_refresh = QPushButton(t("Actualizar"))
-        btn_refresh.clicked.connect(self._refresh)
+        btn_refresh.clicked.connect(lambda: self._refresh(manual=True))
         btn_export = QPushButton(t("Exportar a Excel…"))
         btn_export.clicked.connect(self._on_export)
 
@@ -187,14 +250,18 @@ class SFLWindow(QMainWindow):
 
     def _build_tabs(self) -> QTabWidget:
         self.tabs = QTabWidget()
-        self.tbl_exc, self.m_exc = make_table()
-        self.tabs.addTab(wrap_with_search(self.tbl_exc), t("Excesos"))
+        # Excesos y Conflictos pueden tener decenas de miles de filas tras el
+        # backfill: van paginados (solo se materializa una página -> sin congelar).
+        self.tbl_exc = PaginatedTableView()
+        self.tabs.addTab(self.tbl_exc, t("Excesos"))
         self.tbl_prod, self.m_prod = make_table()
         self.tabs.addTab(self.tbl_prod, t("Por producto"))
         self.tbl_eq, self.m_eq = make_table()
         self.tabs.addTab(self.tbl_eq, t("Por equipo"))
-        self.tbl_conf, self.m_conf = make_table()
-        self.tabs.addTab(wrap_with_search(self.tbl_conf), t("Conflictos"))
+        self.tbl_user, self.m_user = make_table()
+        self.tabs.addTab(self.tbl_user, t("Por usuario"))
+        self.tbl_conf = PaginatedTableView()
+        self.tabs.addTab(self.tbl_conf, t("Conflictos"))
         self.tabs.addTab(self._build_charts_tab(), t("Gráficas"))
         return self.tabs
 
@@ -202,8 +269,10 @@ class SFLWindow(QMainWindow):
         c = QWidget(); grid = QGridLayout(c)
         self.ch_time = TimeSeriesChart(t("Excesos de SFL por mes"), t("Excesos"))
         self.ch_prod = BarChart(t("Excesos por producto"), t("Excesos"))
+        self.ch_user = BarChart(t("Excesos por usuario de campo"), t("Excesos"))
         grid.addWidget(self.ch_time, 0, 0)
         grid.addWidget(self.ch_prod, 0, 1)
+        grid.addWidget(self.ch_user, 1, 0, 1, 2)
         return c
 
     # --- Rango de fechas ----------------------------------------------------
@@ -230,19 +299,56 @@ class SFLWindow(QMainWindow):
 
     # --- Refresco -----------------------------------------------------------
 
-    def _refresh(self):
-        """Relee la réplica y recalcula TODOS los excesos (cache); luego filtra."""
+    def _refresh(self, manual: bool = False):
+        """Relee la réplica y recalcula TODOS los excesos (cache) en SEGUNDO PLANO,
+        luego filtra. El trabajo pesado va en `_LoadWorker` para no congelar la GUI;
+        mientras tanto se muestra el indicador de carga (en la primera carga o en un
+        refresco manual se cubre la ventana; en el auto-refresco solo se informa en
+        la barra de estado para no interrumpir)."""
+        if self._worker is not None and self._worker.isRunning():
+            self._pending_refresh = True   # se relanza al terminar el actual
+            return
+        if manual or self._exc_all.empty:
+            self._show_busy(t("Cargando datos…"))
+        else:
+            self.statusBar().showMessage(f"{t('Actualizando…')} {datetime.now():%H:%M:%S}")
+        # parent=self + finished->deleteLater: Qt es dueño del hilo y lo destruye
+        # de forma segura cuando termina (evita el "destroyed while running" si la
+        # GUI suelta la referencia en el slot `done`).
+        self._worker = _LoadWorker(self._db, self)
+        self._worker.done.connect(self._on_loaded)
+        self._worker.failed.connect(self._on_load_failed)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.start()
+
+    def _on_loaded(self, movements, limits, exc_all, conf_all):
+        self._movements = movements
+        self._limits = limits
+        self._exc_all = exc_all
+        self._conf_all = conf_all
+        self._last_counts = (len(movements), len(limits))
+        self._worker = None
         try:
-            self._movements = self._db.read("movements")
-            self._limits = self._db.get_consumption_limits()
-            self._last_counts = (len(self._movements), len(self._limits))
-            self._exc_all = sa.exceedances(self._movements, self._limits)
-            self._conf_all = sa.unattributed_conflicts(self._movements, self._limits)
             self._refresh_product_combo()
             self._apply_filters()
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, t("Error al analizar"),
-                                 f"{exc}\n\n{traceback.format_exc()}")
+        finally:
+            self._hide_busy()
+        if self._pending_refresh:        # llegaron datos nuevos mientras cargaba
+            self._pending_refresh = False
+            self._refresh()
+
+    def _on_load_failed(self, message: str):
+        self._worker = None
+        self._hide_busy()
+        QMessageBox.critical(self, t("Error al analizar"), message)
+
+    def _show_busy(self, text: str):
+        if self._busy is not None:
+            self._busy.start(text)
+
+    def _hide_busy(self):
+        if self._busy is not None:
+            self._busy.stop()
 
     def _refresh_product_combo(self):
         current = self.cmb_product.currentData()
@@ -279,16 +385,21 @@ class SFLWindow(QMainWindow):
                     out = out[mask]
                 return out
 
-            self._exc = _filt(self._exc_all, ("equipment_id", "equipment_description", "product"))
-            self._conf = _filt(self._conf_all, ("equipment_id", "product", "type", "status"))
+            self._exc = _filt(self._exc_all, ("equipment_id", "equipment_description",
+                                              "product", "field_user"))
+            self._conf = _filt(self._conf_all, ("equipment_id", "product", "type",
+                                                "status", "field_user"))
 
-            self.m_exc.set_dataframe(self._exc[[c for c in _DISPLAY_COLS if c in self._exc.columns]]
-                                     if not self._exc.empty else self._exc)
+            exc_view = (self._exc[[c for c in _DISPLAY_COLS if c in self._exc.columns]]
+                        if not self._exc.empty else self._exc)
+            self.tbl_exc.set_full_dataframe(exc_view)
             self.m_prod.set_dataframe(sa.by_product(self._exc))
             self.m_eq.set_dataframe(sa.by_equipment(self._exc))
-            self.m_conf.set_dataframe(self._conf)
+            self.m_user.set_dataframe(sa.by_field_user(self._exc))
+            self.tbl_conf.set_full_dataframe(self._conf)
             self._update_charts(self._exc)
             self._set_kpis(sa.summary_kpis(self._exc, self._movements), sa.conflict_kpis(self._conf))
+            self._update_progress()
             self._update_status()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, t("Error al filtrar"),
@@ -297,10 +408,47 @@ class SFLWindow(QMainWindow):
     def _maybe_refresh(self):
         try:
             counts = (self._db.row_count("movements"), self._db.row_count("consumption_limits"))
+            backfilled = self._db.get_flag("movements_backfill_done") == "1"
         except Exception:  # noqa: BLE001
             return
-        if counts != self._last_counts:
+        # Refresca si llegaron datos nuevos O si el backfill acaba de terminar (para
+        # que el indicador de progreso salte a 100% / "completo").
+        if counts != self._last_counts or backfilled != self._last_backfilled:
+            self._last_backfilled = backfilled
             self._refresh()
+
+    def _update_progress(self):
+        """Refleja cuánta de la data histórica del rango elegido ya está cargada."""
+        try:
+            backfilled = self._db.get_flag("movements_backfill_done") == "1"
+        except Exception:  # noqa: BLE001
+            backfilled = False
+        lo = self._ts(self.date_from.date())
+        hi = self._ts(self.date_to.date()).normalize() + pd.Timedelta(days=1)
+        pct, done = sa.load_progress(self._movements, lo, hi, backfilled)
+        self._prog_bar.setValue(int(round(pct)))
+        n_mov, n_exc = len(self._movements), len(self._exc_all)
+        chunk = "#2E7D32" if done else "#1F4E78"   # verde al completar, azul cargando
+        self._prog_bar.setStyleSheet(
+            f"QProgressBar{{border:1px solid {theme.accent('#1F4E78')}; border-radius:4px; "
+            f"text-align:center;}} QProgressBar::chunk{{background:{chunk};}}")
+        if done:
+            self._prog_text.setText(
+                f"✓ {t('Datos completos para el rango')} · "
+                f"{n_mov:,} {t('movimientos')} · {n_exc:,} {t('excesos')}")
+        else:
+            oldest = self._oldest_movement_date()
+            self._prog_text.setText(
+                f"{t('Cargando histórico…')} {n_mov:,} {t('movimientos')} · "
+                f"{n_exc:,} {t('excesos')} · {t('más antiguo:')} {oldest}")
+
+    def _oldest_movement_date(self) -> str:
+        if self._movements is None or self._movements.empty:
+            return "—"
+        col = ("record_collected_at" if "record_collected_at" in self._movements.columns
+               else "updated_at")
+        d = pd.to_datetime(self._movements[col], errors="coerce").dropna()
+        return "—" if d.empty else f"{d.min():%d/%m/%Y}"
 
     def _update_status(self):
         pct = config.SFL_TOLERANCE_PCT * 100
@@ -319,6 +467,14 @@ class SFLWindow(QMainWindow):
             self.ch_prod.set_data(bp["Producto"].astype(str).tolist(), bp["Excesos"].tolist(), "#C62828")
         else:
             self.ch_prod.set_data([], [])
+        # Excesos por usuario de campo (top 15): auditoría de operadores con más
+        # sobrellenados — apoya la detección de posible sustracción de combustible.
+        bu = sa.by_field_user(exc).head(15)
+        if not bu.empty:
+            self.ch_user.set_data(bu["field_user"].astype(str).tolist(),
+                                  bu["Excesos"].tolist(), "#833C00")
+        else:
+            self.ch_user.set_data([], [])
 
     def _set_kpis(self, k: dict, ck: dict):
         while self._kpi_layout.count():
@@ -354,6 +510,7 @@ class SFLWindow(QMainWindow):
                            if not self._exc.empty else self._exc,
                 "Por producto": sa.by_product(self._exc),
                 "Por equipo": sa.by_equipment(self._exc),
+                "Por usuario": sa.by_field_user(self._exc),
                 "Conflictos": self._conf,
             })
             QMessageBox.information(self, t("Exportado"), f"{t('Análisis generado:')}\n{path}")
