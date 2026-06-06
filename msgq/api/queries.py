@@ -116,7 +116,12 @@ MOVEMENT_CONNECTIONS = {
 # Clave = nombre del campo en el tipo (lo que devuelve la introspeccion);
 # valor = su seleccion GraphQL.
 OPTIONAL_DISPENSE_FIELDS = {
-    "meter":              "meter { code description erpReference }",
+    # OJO: la introspeccion solo valida el campo TOP-LEVEL (`meter`), no sus
+    # subcampos. El tipo `Meter` de este tenant solo expone code/description
+    # (lastChangedAt aparte); pedir `erpReference` rompia TODA la query de
+    # dispenses con "Field 'erpReference' doesn't exist on type 'Meter'", lo que
+    # abortaba la sincronizacion de movimientos (dispenses es la 1ra conexion).
+    "meter":              "meter { code description }",
     "averageFlowRate":    "averageFlowRate",
     "duration":           "duration",
     "rawSmuValue":        "rawSmuValue",
