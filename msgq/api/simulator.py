@@ -454,12 +454,24 @@ class SimulatorSource:
 
         if kind == KIND_DISPENSE:
             node["volume"] = f"{volume:.1f}"
-            node["smuValue"] = str(e["smu"] + rng.randint(0, 5000))
+            smu = str(e["smu"] + rng.randint(0, 5000))
+            node["smuValue"] = smu
             node["smuType"] = e["interval_type"]
             node["source"] = {"code": "T-LFO", "name": rng.choice(["LFO Main", "Tank 084X"])}
             node["target"] = {"equipmentId": e["equipment_id"],
                               "description": e["description"], "status": e["status"]}
             node["fieldUser"] = {"name": node["operator"]}
+            # Campos de hardware (espejo del export real): SMU crudo/calculado +
+            # fuente, y la manguera/medidor con su caudal promedio y duracion.
+            node["rawSmuValue"] = smu
+            node["calculatedSmuValue"] = smu
+            node["smuSource"] = "adaptsmu"
+            node["smuValueSource"] = "adaptsmu"
+            meter = rng.choice(["MER.1.1.1", "MER.2.1.2", "MER.4.1.1", "MER.6.1.1"])
+            node["meter"] = {"code": meter, "description": f"LFO Lane {meter}", "erpReference": ""}
+            peak = float(node["peakFlowRate"])
+            node["averageFlowRate"] = f"{peak * rng.uniform(0.7, 0.95):.2f}"
+            node["duration"] = str(int(max(1, volume / max(1.0, peak) * 60)))
         elif kind == KIND_DELIVERY:
             node["volume"] = f"{volume:.1f}"
             node["volumeSource"] = rng.choice([SOURCE_METER, SOURCE_DOCKET])

@@ -76,6 +76,7 @@ def _first_product(enabled_products: Any) -> Any:
 def flatten_movement(node: dict) -> dict:
     target = node.get("target") or {}
     service_truck = node.get("serviceTruck") or {}
+    meter = node.get("meter") or {}
     # `target` es Equipment Item solo en dispenses; en transfer/delivery es Tank.
     target_equipment_id = target.get("equipmentId")
     return {
@@ -84,11 +85,20 @@ def flatten_movement(node: dict) -> dict:
         "type":                     node.get("type"),
         "status":                   node.get("status"),
         "volume":                   node.get("volume"),
+        # Volumen DIGITADO en campo desde la guia del camion (entregas): se compara
+        # contra `volume` (medido) en la auditoria de desviacion de volumen.
+        "secondary_volume":         node.get("secondaryVolume"),
         "record_collected_at":      node.get("recordCollectedAt"),
         "created_at":               node.get("recordCreatedAt"),
         "updated_at":               node.get("recordUpdatedAt"),
         "transaction_temperature":  node.get("transactionTemperature"),
         "peak_flow_rate":           node.get("peakFlowRate"),
+        # Medidor/manguera y caudal (opcionales; None si el endpoint no los expone).
+        "average_flow_rate":        node.get("averageFlowRate"),
+        "flow_duration_s":          node.get("duration"),
+        "meter_id":                 meter.get("code"),
+        "meter_description":        meter.get("description"),
+        "meter_erp":                meter.get("erpReference"),
         "primary_volume_source":    node.get("volumeSource"),
         "secondary_volume_source":  node.get("secondaryVolumeSource"),
         "max_contamination_4":      node.get("maxContamination4"),
@@ -102,6 +112,11 @@ def flatten_movement(node: dict) -> dict:
         "med_contamination_14":     node.get("medContamination14"),
         "smu_value":                node.get("smuValue"),
         "smu_type":                 node.get("smuType"),
+        # SMU crudo vs calculado + fuente (opcionales; None si no se exponen).
+        "raw_smu_value":            node.get("rawSmuValue"),
+        "calculated_smu_value":     node.get("calculatedSmuValue"),
+        "smu_source":               node.get("smuSource"),
+        "smu_value_source":         node.get("smuValueSource"),
         "gps_coordinates":          node.get("gpsCoordinates"),
         "cost":                     node.get("cost"),
         "cost_centre":              _label(node.get("costCentre")),
@@ -217,11 +232,12 @@ def flatten_adaptmac(node: dict) -> dict:
 # ===========================================================================
 
 _MOVEMENT_NUMERIC = [
-    "volume", "transaction_temperature", "peak_flow_rate",
+    "volume", "secondary_volume", "transaction_temperature", "peak_flow_rate",
+    "average_flow_rate", "flow_duration_s",
     "max_contamination_4", "avg_contamination_4", "med_contamination_4",
     "max_contamination_6", "avg_contamination_6", "med_contamination_6",
     "max_contamination_14", "avg_contamination_14", "med_contamination_14",
-    "smu_value", "cost", "rebate_amount",
+    "smu_value", "raw_smu_value", "calculated_smu_value", "cost", "rebate_amount",
 ]
 _MOVEMENT_DATETIME = ["record_collected_at", "created_at", "updated_at"]
 
@@ -330,6 +346,66 @@ def rfid_assignments_df(equipment: pd.DataFrame, when) -> pd.DataFrame:
                         "last_seen": ts,
                     })
     return _build_df(rows, config.RFID_HISTORY_COLS, None, ["last_seen"])
+
+
+def enabled_products_df(limits: pd.DataFrame, existing, when) -> pd.DataFrame:
+    """Aplana los productos HABILITADOS vigentes (de `consumption_limits`) a UNA
+    fila por (equipo, PRODUCTO) para el historial de habilitacion (ventanas).
+
+    `key` = "equipment_id|PRODUCTO_MAYUS" (PK); `last_seen` = `when`; `first_seen`
+    = el ya registrado en `existing` (product_history) si el par ya se habia
+    visto, si no `when` (primera observacion). Solo emite los pares VIGENTES: los
+    ya deshabilitados no se reinsertan, asi su `last_seen` queda congelado en la
+    tabla (= fin de la ventana de habilitacion), igual que los tags removidos en
+    `rfid_assignments_df`. Vacio si no hay limites.
+    """
+    rows: list[dict] = []
+    if (limits is None or limits.empty
+            or not {"equipment_id", "product"}.issubset(limits.columns)):
+        return _build_df(rows, config.PRODUCT_HISTORY_COLS, None, ["first_seen", "last_seen"])
+
+    ts = pd.Timestamp(when).isoformat()
+    # first_seen ya registrado por clave, para preservarlo entre observaciones.
+    prior: dict[str, str] = {}
+    if existing is not None and not existing.empty and "key" in existing.columns:
+        for _, h in existing.iterrows():
+            k, fs = h.get("key"), h.get("first_seen")
+            try:
+                k_blank = k is None or pd.isna(k)
+                fs_blank = fs is None or pd.isna(fs)
+            except (TypeError, ValueError):
+                k_blank, fs_blank = False, False
+            if not k_blank and not fs_blank:
+                prior[str(k)] = pd.Timestamp(fs).isoformat()
+
+    seen: set[str] = set()
+    for _, r in limits.iterrows():
+        eid, prod = r.get("equipment_id"), r.get("product")
+        try:
+            blank = (eid is None or pd.isna(eid) or prod is None or pd.isna(prod))
+        except (TypeError, ValueError):
+            blank = False
+        if blank:
+            continue
+        eid_s = str(eid).strip()
+        prod_s = str(prod).strip()
+        produ = prod_s.upper()
+        if not eid_s or not produ or produ in ("<NA>", "NAN"):
+            continue
+        key = f"{eid_s}|{produ}"
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            "key": key,
+            "equipment_id": eid_s,
+            "product": prod_s,
+            "product_code": r.get("product_code"),
+            "internal_id": r.get("internal_id"),
+            "first_seen": prior.get(key, ts),
+            "last_seen": ts,
+        })
+    return _build_df(rows, config.PRODUCT_HISTORY_COLS, None, ["first_seen", "last_seen"])
 
 
 # ===========================================================================

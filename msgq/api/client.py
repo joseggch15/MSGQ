@@ -16,13 +16,21 @@ Se usa desde el hilo de polling, que mantiene un event loop asyncio vivo.
 """
 from __future__ import annotations
 
+import asyncio
+import random
+import time
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
 
 from msgq.api import queries
 from msgq.config import Settings
+
+# Tope (s) para no colgar un ciclo si un `Retry-After` viniera con un valor
+# absurdamente grande: obedecemos al servidor, pero con sentido comun.
+_RETRY_AFTER_CEILING = 300.0
 
 
 # ===========================================================================
@@ -57,6 +65,12 @@ class AdaptIQClient:
         self._client: httpx.AsyncClient | None = None
         self._site_id: str | None = settings.site_id or None
         self._equipment_field: str | None = None   # None=sin descubrir; _NO_EQUIPMENT=no hay
+        self._dispense_fields: set[str] | None = None   # campos opcionales de hardware descubiertos
+        # Control de ritmo (cortesia con el endpoint): instante monotonico a partir
+        # del cual se permite la proxima peticion. El lock se crea perezosamente
+        # (necesita un event loop corriendo) y serializa el espaciado.
+        self._throttle_lock: asyncio.Lock | None = None
+        self._next_request_at: float = 0.0
 
     # -- ciclo de vida ------------------------------------------------------
 
@@ -79,29 +93,98 @@ class AdaptIQClient:
     async def _execute(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         client = self._ensure_client()
         payload = {"query": query, "variables": variables}
-        try:
-            resp = await client.post(self._settings.endpoint, json=payload)
-        except httpx.TimeoutException as exc:
-            raise TransportError(f"Timeout al consultar {self._settings.endpoint}") from exc
-        except httpx.HTTPError as exc:
-            raise TransportError(f"Fallo de conexion: {exc}") from exc
+        attempt = 0
+        while True:
+            await self._throttle()   # espacia las peticiones (anti fuerza-bruta)
+            try:
+                resp = await client.post(self._settings.endpoint, json=payload)
+            except httpx.TimeoutException as exc:
+                if attempt < self._settings.max_retries:
+                    attempt += 1
+                    await self._sleep_backoff(attempt)
+                    continue
+                raise TransportError(
+                    f"Timeout al consultar {self._settings.endpoint}") from exc
+            except httpx.HTTPError as exc:
+                if attempt < self._settings.max_retries:
+                    attempt += 1
+                    await self._sleep_backoff(attempt)
+                    continue
+                raise TransportError(f"Fallo de conexion: {exc}") from exc
 
-        if resp.status_code in (401, 403):
-            raise AuthError(
-                "Autenticacion rechazada (HTTP %d). Verifica el token en "
-                "'Authorization: Token token=<token>'." % resp.status_code)
-        if resp.status_code >= 400:
-            raise TransportError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+            # 429 (Too Many Requests) / 503: el servidor pide EXPRESAMENTE que
+            # bajemos el ritmo. Respetamos `Retry-After` y reintentamos en vez de
+            # propagar el error; es la respuesta correcta y la que evita que un
+            # WAF/IDS escale el bloqueo creyendo que es un ataque sostenido.
+            if resp.status_code in (429, 503) and attempt < self._settings.max_retries:
+                attempt += 1
+                await self._sleep_retry_after(resp, attempt)
+                continue
 
-        try:
-            body = resp.json()
-        except ValueError as exc:
-            raise GraphQLError(f"Respuesta no es JSON valido: {resp.text[:300]}") from exc
+            if resp.status_code in (401, 403):
+                raise AuthError(
+                    "Autenticacion rechazada (HTTP %d). Verifica el token en "
+                    "'Authorization: Token token=<token>'." % resp.status_code)
+            if resp.status_code >= 400:
+                raise TransportError(f"HTTP {resp.status_code}: {resp.text[:300]}")
 
-        if body.get("errors"):
-            messages = "; ".join(str(e.get("message", e)) for e in body["errors"])
-            raise GraphQLError(messages)
-        return body.get("data") or {}
+            try:
+                body = resp.json()
+            except ValueError as exc:
+                raise GraphQLError(f"Respuesta no es JSON valido: {resp.text[:300]}") from exc
+
+            if body.get("errors"):
+                messages = "; ".join(str(e.get("message", e)) for e in body["errors"])
+                raise GraphQLError(messages)
+            return body.get("data") or {}
+
+    # -- cortesia con el endpoint (throttle + backoff) ---------------------
+
+    async def _throttle(self) -> None:
+        """Espacia las peticiones: garantiza al menos `request_min_interval`
+        segundos (mas un jitter aleatorio) entre el INICIO de dos llamadas
+        consecutivas. Asi el backfill historico (miles de paginas) y la
+        paginacion en general se reparten en el tiempo y no parecen un escaneo
+        ni un ataque de fuerza bruta al endpoint de Veridapt AdaptIQ."""
+        interval = max(0.0, self._settings.request_min_interval)
+        jitter_max = max(0.0, self._settings.request_jitter)
+        if interval <= 0.0 and jitter_max <= 0.0:
+            return
+        if self._throttle_lock is None:
+            self._throttle_lock = asyncio.Lock()
+        async with self._throttle_lock:
+            now = time.monotonic()
+            wait = self._next_request_at - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+                now = time.monotonic()
+            self._next_request_at = now + interval + random.uniform(0.0, jitter_max)
+
+    async def _sleep_backoff(self, attempt: int) -> None:
+        """Espera exponencial con jitter antes de reintentar un fallo transitorio
+        (timeout / conexion), para no martillar un endpoint que ya esta en apuros.
+        `attempt` es 1-based: 1ra reintento espera ~base, luego 2x, 4x, ... (con techo)."""
+        delay = self._backoff_delay(attempt)
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    async def _sleep_retry_after(self, resp: httpx.Response, attempt: int) -> None:
+        """Obedece la cabecera `Retry-After` de un 429/503 si viene (en segundos o
+        como fecha HTTP); si no, aplica backoff exponencial. Acota con un techo de
+        seguridad para no dejar el ciclo colgado indefinidamente."""
+        delay = _parse_retry_after(resp.headers.get("Retry-After"))
+        if delay is None:
+            delay = self._backoff_delay(attempt)
+        delay = max(0.0, min(delay, _RETRY_AFTER_CEILING))
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    def _backoff_delay(self, attempt: int) -> float:
+        """Retardo de backoff exponencial (base * 2^(attempt-1), con techo) mas un
+        jitter de hasta `base` para desincronizar reintentos."""
+        base = max(0.0, self._settings.retry_backoff)
+        capped = min(base * (2 ** max(0, attempt - 1)), self._settings.retry_backoff_max)
+        return capped + random.uniform(0.0, base)
 
     async def _paginate_site_connection(
         self, query: str, connection: str, variables: dict[str, Any],
@@ -179,6 +262,7 @@ class AdaptIQClient:
         filt = {"updatedFrom": _iso(updated_from)} if updated_from else {}
         out: list[dict] = []
         for connection, (query, kind) in queries.MOVEMENT_CONNECTIONS.items():
+            query = await self._movement_query(connection, query)
             nodes = await self._paginate_site_connection(
                 query, connection,
                 {"siteId": site_id, "filter": filt, "first": self._settings.page_size},
@@ -195,6 +279,7 @@ class AdaptIQClient:
         site_id = await self._resolve_site_id()
         filt = {"updatedFrom": _iso(updated_from)} if updated_from else {}
         for connection, (query, kind) in queries.MOVEMENT_CONNECTIONS.items():
+            query = await self._movement_query(connection, query)
             cursor: str | None = None
             for _ in range(1_000_000):  # cota de seguridad
                 page_vars: dict[str, Any] = {
@@ -273,6 +358,37 @@ class AdaptIQClient:
             if not cursor:
                 break
 
+    async def _movement_query(self, connection: str, default_query: str) -> str:
+        """Para la conexion `dispenses`, incluye los campos OPCIONALES de hardware
+        (medidor, caudal promedio, SMU crudo/calculado) que el endpoint exponga,
+        descubiertos por introspeccion. Para deliveries/transfers, la query fija."""
+        if connection == "dispenses":
+            return queries.build_dispenses_query(await self._discover_dispense_fields())
+        return default_query
+
+    async def _discover_dispense_fields(self) -> set[str]:
+        """Introspecciona el tipo del nodo de despacho y devuelve que campos
+        opcionales (de `OPTIONAL_DISPENSE_FIELDS`) expone realmente. Si la
+        introspeccion no esta disponible o el tipo no existe, devuelve un set
+        vacio (la query queda sin esos campos: sincronizacion intacta)."""
+        if self._dispense_fields is not None:
+            return self._dispense_fields
+        available: set[str] = set()
+        wanted = set(queries.OPTIONAL_DISPENSE_FIELDS.keys())
+        for type_name in queries.DISPENSE_TYPE_CANDIDATES:
+            try:
+                data = await self._execute(queries.dispense_type_introspection(type_name), {})
+            except APIError:
+                continue
+            type_info = data.get("__type")
+            if not type_info:
+                continue
+            names = {f["name"] for f in (type_info.get("fields") or [])}
+            available = names & wanted
+            break   # tipo hallado: su interseccion es la respuesta (aunque sea vacia)
+        self._dispense_fields = available
+        return available
+
     async def _discover_equipment_field(self) -> str:
         """Introspecciona el tipo Site para hallar la conexion de equipos.
 
@@ -299,3 +415,25 @@ class AdaptIQClient:
 def _iso(dt: datetime) -> str:
     """Formatea un datetime a ISO8601 (lo que espera `updatedFrom`)."""
     return dt.isoformat()
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Convierte una cabecera `Retry-After` a segundos. Acepta los dos formatos
+    del estandar HTTP: un entero de segundos (`Retry-After: 30`) o una fecha HTTP
+    (`Retry-After: Wed, 21 Oct 2025 07:28:00 GMT`). Devuelve None si esta ausente
+    o no se puede interpretar (el llamador cae a backoff exponencial)."""
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+    return max(0.0, (dt - now).total_seconds())

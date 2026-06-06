@@ -86,6 +86,215 @@ SFL_TOLERANCE_PCT = 0.02
 # producto: combustible despachado sin trazabilidad y por encima de lo seguro.
 ALERT_SFL_CONFLICT = "Despacho sin equipo / no autorizado"
 
+# ---------------------------------------------------------------------------
+# Auditoria de Burn Rate (consumo de combustible, L/h)
+# ---------------------------------------------------------------------------
+# El burn rate de un equipo es el combustible que quema por unidad de SMU
+# (horas-motor para la mayoria de la flota; odometro en vehiculos ligeros). Se
+# calcula por el metodo 'tanque-a-tanque' a partir de los despachos: entre dos
+# despachos CONSECUTIVOS del mismo equipo, los litros del despacho posterior
+# reponen lo quemado desde el anterior, y el burn rate del intervalo es esos
+# litros divididos por el avance del SMU. Es el mismo metodo que AdaptIQ
+# pre-calcula (Litres Consumed / SMU Increase), pero reconstruido en vivo desde
+# el endpoint para poder auditarlo y graficarlo. Las anomalias se detectan con
+# estadistica ROBUSTA (mediana + MAD), inmune a los outliers que justamente se
+# quieren marcar.
+
+# Avance minimo de SMU (mismas unidades del SMU) para que un intervalo sea
+# valido: por debajo de esto el cociente litros/ΔSMU se dispara por division
+# entre casi-cero (ruido del medidor, no consumo real).
+BURN_RATE_MIN_SMU_DELTA = 0.1
+
+# Techo de plausibilidad (L/h): un burn rate por encima de esto no es fisicamente
+# posible para una sola maquina; es un artefacto del dato (p. ej. el SMU de un
+# tanque que avanza '1' y se le imputan miles de litros). Esos intervalos se
+# descartan de las muestras para no contaminar las lineas base.
+BURN_RATE_MAX_PLAUSIBLE = 2000.0
+
+# Intervalos minimos (despachos consecutivos validos) para considerar confiable
+# el burn rate de UN equipo: con menos muestras la mediana es inestable.
+BURN_RATE_MIN_SAMPLES = 3
+
+# Equipos minimos (con burn rate confiable) para fijar la linea base de UNA
+# categoria: con menos no hay con que comparar.
+BURN_RATE_MIN_CAT_EQUIPMENT = 3
+
+# |z robusto| (desviacion respecto a la mediana de la categoria, escalada por
+# MAD) a partir del cual un equipo se marca como anomalo.
+BURN_RATE_Z_THRESHOLD = 3.5
+
+# Ademas del z, se exige una desviacion relativa minima vs la linea base, para no
+# marcar diferencias estadisticamente 'significativas' pero operativamente
+# triviales en categorias muy homogeneas.
+BURN_RATE_MIN_DEV_PCT = 15.0
+
+# |z robusto| (respecto al propio historial del equipo) para marcar UN intervalo
+# (un despacho puntual) como atipico: un pico o caida que merece investigarse.
+BURN_RATE_INTERVAL_Z = 4.0
+
+# Categoria de alerta para un equipo cuyo burn rate se desvia de su categoria
+# (sobre-consumo: posible fuga/robo/falla mecanica; sub-consumo: posible
+# medidor mal o despachos sin registrar).
+ALERT_BURN_RATE_ANOMALY = "Burn rate anomalo"
+
+# ---------------------------------------------------------------------------
+# Auditoria de Salud de Hardware y Sensores
+# ---------------------------------------------------------------------------
+# El SMU (horometro/odometro) SIEMPRE debe avanzar. Una caida respecto a una
+# lectura anterior significa sensor roto, reiniciado o manipulado. Un valor que
+# no cambia en varias cargas de un equipo operativo significa que el sensor no
+# envia pulsos al AdaptMAC.
+
+# Una regresion se marca cuando el SMU da un paso ATRAS respecto a la lectura
+# inmediatamente anterior y NO se recupera en la siguiente (la lectura siguiente
+# sigue por debajo del nivel previo). Asi cada reset/manipulacion se reporta UNA
+# vez (el evento), no cada despacho posterior; y un bache transitorio que se
+# recupera no cuenta. La caida debe superar este minimo (filtra ruido de medicion).
+SMU_REGRESSION_MIN_DROP = 1.0      # caida minima de SMU para marcar (unidades del SMU)
+
+# Estancamiento: mismo SMU crudo en >= N despachos consecutivos abarcando >= D
+# dias, en un equipo In Service -> el sensor no reporta (ticket de mantenimiento).
+SMU_STAGNATION_MIN_REPEATS = 5
+SMU_STAGNATION_MIN_DAYS = 5
+
+# Re-tagueo sospechoso: mas de N cambios de RFID del MISMO equipo en una ventana
+# movil de D dias -> el operador podria estar destruyendo los tags para forzar
+# despachos manuales / bypass.
+RETAG_MAX_CHANGES = 3
+RETAG_WINDOW_DAYS = 30
+
+# Degradacion del medidor: por manguera (Meter ID), si el caudal promedio
+# reciente cae >= PCT% respecto a su linea base historica, los filtros estan
+# obstruidos o la bomba falla. Requiere muestras suficientes a cada lado.
+METER_RECENT_DAYS = 7
+METER_DROP_PCT = 40.0
+METER_MIN_SAMPLES = 5
+
+# Categorias de alerta de hardware (valores canonicos en espanol).
+ALERT_SMU_REGRESSION = "SMU en regresion (sensor)"
+ALERT_SMU_STAGNATION = "SMU estancado (sensor sin pulsos)"
+ALERT_RETAG = "Re-tagueo RFID sospechoso"
+ALERT_METER_DEGRADED = "Caudal de medidor degradado"
+
+# ---------------------------------------------------------------------------
+# Auditoria de coherencia Producto <-> Equipo (posible tag clonado)
+# ---------------------------------------------------------------------------
+# Un equipo solo deberia recibir los productos que tiene habilitados
+# (`consumptionTanks`). Despacharle un producto AJENO —p. ej. "Coolant" o
+# "Hydraulic Fluid" a un equipo solo-DIESEL, o viceversa— suele indicar un tag
+# RFID clonado o un equipo mal configurado en el maestro.
+#
+# El reto temporal: un producto pudo estar habilitado y luego deshabilitarse,
+# dejando despachos LEGITIMOS en el historico. La API no expone CUANDO se
+# habilito/deshabilito cada producto, asi que un producto se considera legitimo
+# para un equipo si tiene HUELLA REAL en el propio historial de despachos del
+# equipo: cumple cualquiera de estos umbrales -> "establecido por uso".
+PRODUCT_MISMATCH_MIN_EVENTS = 3      # despachos del mismo producto en el equipo
+PRODUCT_MISMATCH_MIN_DAYS   = 14     # o span (primer..ultimo) >= 14 dias
+PRODUCT_MISMATCH_MIN_SHARE  = 0.15   # o >= 15% de los despachos del equipo
+
+# Categorias de alerta (valores canonicos en espanol): producto de OTRA clase
+# (combustible vs fluido) es la senal fuerte de tag clonado (CRITICO); producto
+# de la MISMA clase pero fuera del maestro es probable mala configuracion (WARN).
+ALERT_PRODUCT_FOREIGN    = "Producto ajeno al equipo (posible tag clonado)"
+ALERT_PRODUCT_OFF_MASTER = "Producto fuera del maestro del equipo"
+
+# ---------------------------------------------------------------------------
+# Auditoria de Desviacion de Volumen en Entregas (Metered vs Field Entered)
+# ---------------------------------------------------------------------------
+# En una entrega (delivery) el sistema guarda DOS volumenes: el MEDIDO (`volume`,
+# del medidor digital de la linea o del gauge del tanque) y el DIGITADO en campo
+# a partir de la guia del camion de combustible (`secondary_volume`). Una
+# diferencia sostenida entre ambos significa que el proveedor factura litros que
+# nunca entraron al tanque, o que el medidor esta descalibrado. Se audita la
+# desviacion relativa entre ambos, sobre el volumen MEDIDO (la referencia fisica).
+#
+# Confirmado en los CSV reales de Merian: las entregas MANUAL traen
+# `Metered Volume` y `Field Entered Volume` por separado (p. ej. 39.810,5 medido
+# vs 40.000 de guia = 0,48%, dentro de tolerancia), y las GAUGED comparan el gauge
+# (`GTS Volume`, que viaja en `volume`) contra la guia (8-11% en la muestra).
+
+# Desviacion relativa minima (%) para marcar una entrega. 1% es el umbral pedido.
+DELIVERY_VOLUME_DEVIATION_PCT = 1.0
+# Desviacion (%) a partir de la cual la alerta escala a CRITICA (no es ruido de
+# medicion: hay una discrepancia grande de volumen/dinero con el proveedor).
+DELIVERY_VOLUME_DEVIATION_CRITICAL_PCT = 5.0
+# Entregas por debajo de este volumen (L) se ignoran: una guia de pocos litros con
+# una diferencia absoluta minima dispara un % enorme sin relevancia operativa.
+DELIVERY_MIN_VOLUME_L = 100.0
+
+# Categoria de alerta para una entrega cuya desviacion medidor-vs-guia supera el
+# umbral (posible sobre-facturacion del proveedor o medidor descalibrado).
+ALERT_VOLUME_DEVIATION = "Desviacion de volumen en entrega (medidor vs guia)"
+
+# Etiquetas (canonicas en espanol) de la direccion de la desviacion: la guia
+# reclama MAS de lo medido (sobre-facturacion) o MENOS (sub-registro / medidor).
+DELIVERY_DIR_OVERBILL  = "Guia sobre lo medido"
+DELIVERY_DIR_UNDERBILL = "Guia bajo lo medido"
+
+# ---------------------------------------------------------------------------
+# Auditoria de Tag Hopping ("el tag en el bolsillo")
+# ---------------------------------------------------------------------------
+# El tag RFID identifica al equipo: cada despacho queda imputado al equipo cuyo
+# tag se leyo. Si el MISMO tag autoriza dos despachos en puntos de despacho
+# fisicamente distintos en un lapso imposible (el equipo no pudo viajar entre
+# ellos), alguien removio el tag del equipo para robar combustible (o el tag esta
+# clonado). Se detecta de dos formas complementarias (el usuario pidio AMBAS):
+#
+#   1. SOLAPAMIENTO temporal: dos despachos del mismo equipo en puntos distintos
+#      cuyos intervalos [inicio, inicio+duracion] se solapan -> fisicamente
+#      imposible. NO necesita coordenadas: cubre el ~99% de despachos de islas
+#      fijas (sin GPS por transaccion). Es la senal de mayor confianza (CRITICO).
+#   2. VELOCIDAD implicita: cuando ambos despachos traen coordenadas (GPS por
+#      transaccion, presente en los surtidores moviles) o el punto esta en el mapa
+#      OPCIONAL de coordenadas de puntos fijos, se calcula distancia/tiempo; por
+#      encima de una velocidad implausible para ese tipo de equipo se marca (WARN).
+#
+# El "punto de despacho" (la ubicacion) se deriva del tanque/medidor del despacho;
+# dos mangueras del mismo tanque cuentan como el MISMO lugar (no es hopping).
+
+# Velocidad implicita (km/h) sobre la cual un equipo PESADO no pudo recorrer la
+# distancia entre dos puntos de despacho en el tiempo transcurrido (no circula por
+# vias a esa velocidad; suele transportarse en cama baja).
+TAG_HOP_MAX_SPEED_KMH = 40.0
+# Idem para VEHICULOS LIGEROS, que si se desplazan rapido por el sitio: su umbral
+# es mas alto para no marcar viajes legitimos (se distinguen por is_light_vehicle).
+TAG_HOP_LIGHT_MAX_SPEED_KMH = 100.0
+# Distancia (km) por debajo de la cual se ignora la diferencia de GPS: filtra el
+# jitter del receptor (dos lecturas del mismo punto difieren decenas de metros).
+TAG_HOP_MIN_DISTANCE_KM = 0.5
+# Holgura (minutos) de solapamiento que se exige antes de marcar por imposibilidad
+# temporal, para absorber el desfase de reloj entre consolas (no marcar por ruido).
+TAG_HOP_CLOCK_SLACK_MIN = 1.0
+
+# Categoria de alerta para el mismo tag en dos lugares en un lapso imposible.
+ALERT_TAG_HOPPING = "Tag en dos lugares a la vez (posible robo de combustible)"
+
+# Razones (canonicas en espanol) por las que un par de despachos se marca.
+TAG_HOP_REASON_OVERLAP = "Solapamiento temporal"
+TAG_HOP_REASON_SPEED   = "Velocidad imposible"
+
+# Clase de producto: distingue combustible de fluido de servicio para escalar
+# los cruces entre clases (lo que el usuario describio: DIESEL vs Coolant/Hidraulico).
+PRODUCT_CLASS_FUEL  = "FUEL"
+PRODUCT_CLASS_FLUID = "FLUID"
+PRODUCT_CLASS_OTHER = "OTHER"
+# Clasificacion por substring en la etiqueta del producto (en MAYUSCULAS).
+# `product_audit.product_class` evalua FUEL ANTES que FLUID, para que un
+# combustible como "Gas Oil" (que contiene la subcadena 'OIL', keyword de FLUID)
+# se clasifique correctamente como FUEL por su keyword "GAS OIL"/"GASOIL".
+PRODUCT_CLASS_KEYWORDS = {
+    PRODUCT_CLASS_FUEL: (
+        "DIESEL", "GASOIL", "GAS OIL", "UNLEADED", "GASOLINE", "PETROL",
+        "ULP", "LFO", "FUEL",
+    ),
+    PRODUCT_CLASS_FLUID: (
+        "COOLANT", "HYDRAUL", "HIDRA", "OIL", "LUBRIC", "GREASE", "GRASA",
+        "ADBLUE", "DEF", "GLYCOL", "GLICOL", "ANTIFREEZE", "ANTICONG",
+        "REFRIG", "ATF", "15W", "10W", "5W", "80W", "85W",
+    ),
+}
+
 # ===========================================================================
 # Esquema canonico de columnas (contrato entre capas)
 # ===========================================================================
@@ -93,13 +302,24 @@ ALERT_SFL_CONFLICT = "Despacho sin equipo / no autorizado"
 # Un registro de movimiento aplanado (dispense / delivery / transfer).
 MOVEMENT_COLS = [
     "id", "kind", "type", "status",
-    "volume", "record_collected_at", "created_at", "updated_at",
+    # `volume` = volumen MEDIDO (medidor/gauge); `secondary_volume` = volumen
+    # DIGITADO en campo desde la guia del camion (solo entregas) — su diferencia
+    # es lo que audita core/volume_deviation (medidor vs guia).
+    "volume", "secondary_volume", "record_collected_at", "created_at", "updated_at",
     "transaction_temperature", "peak_flow_rate",
+    # Salud del medidor/manguera (auditoria de hardware): que medidor entrego el
+    # despacho y su caudal/duracion. Solo se pueblan si el endpoint los expone
+    # (se descubren por introspeccion; ver api/queries.build_dispenses_query).
+    "average_flow_rate", "flow_duration_s", "meter_id", "meter_description", "meter_erp",
     "primary_volume_source", "secondary_volume_source",
     "max_contamination_4", "avg_contamination_4", "med_contamination_4",
     "max_contamination_6", "avg_contamination_6", "med_contamination_6",
     "max_contamination_14", "avg_contamination_14", "med_contamination_14",
-    "smu_value", "smu_type", "gps_coordinates",
+    "smu_value", "smu_type",
+    # SMU crudo vs calculado + fuente (auditoria de hardware): el crudo es la
+    # mejor senal de "el sensor no envia pulsos" (estancamiento).
+    "raw_smu_value", "calculated_smu_value", "smu_source", "smu_value_source",
+    "gps_coordinates",
     "cost", "cost_centre", "rebate_amount",
     "site", "product", "tank",
     "equipment_id", "equipment_description", "equipment_status",
@@ -153,6 +373,18 @@ RFID_HISTORY_COLS = ["tag", "equipment_id", "internal_id", "last_seen"]
 # (validado en vivo: `ConsumptionTank{id, sfl, product{code description}}`). `id` =
 # ConsumptionTank id (PK); `product` = description (llave de cruce con el despacho).
 CONSUMPTION_LIMIT_COLS = ["id", "equipment_id", "internal_id", "product", "product_code", "sfl"]
+
+# Historial de productos HABILITADOS por equipo, acumulado por el poller en cada
+# refresco del maestro (analogo a RFID_HISTORY_COLS). Reconstruye la VENTANA en
+# que cada producto estuvo habilitado en un equipo, dato que la API no expone
+# (consumptionTanks es solo el estado actual). Permite distinguir un despacho
+# legitimo (cae dentro de [first_seen, last_seen]) de uno ajeno. `key` (=
+# "equipment_id|PRODUCTO_MAYUS") es la PK sintetica que hace idempotente el upsert;
+# los productos ya deshabilitados no se reinsertan -> su `last_seen` queda congelado.
+PRODUCT_HISTORY_COLS = [
+    "key", "equipment_id", "product", "product_code", "internal_id",
+    "first_seen", "last_seen",
+]
 
 # Una reconciliacion diaria por tanque (el reporte 'Detailed Reconciliation' que
 # AdaptIQ pre-calcula): stock medido (opening/closing) vs movimiento
@@ -243,6 +475,25 @@ DEFAULT_POLL_SECONDS = 20
 DEFAULT_PAGE_SIZE = 100        # la API limita a 100 registros por pagina
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "msgq_replica.sqlite3")
 
+# --- Cortesia con el endpoint (anti fuerza-bruta / DDoS) -------------------
+# El monitor es un BUEN ciudadano de la API de Veridapt AdaptIQ: espacia sus
+# peticiones para que el alto volumen (sobre todo el backfill historico, que
+# pagina miles de veces seguidas) no se confunda con un escaneo, fuerza bruta o
+# negacion de servicio. Estos valores se aplican en `AdaptIQClient._execute`.
+#
+# Segundos minimos entre el INICIO de dos peticiones consecutivas. A 0.3s el
+# techo es ~3 req/s, muy por debajo de lo que un IDS/WAF considera abuso, y
+# apenas anade ~1s a un ciclo incremental normal (pocas paginas).
+DEFAULT_REQUEST_INTERVAL = 0.3
+# Jitter aleatorio (0..N s) que se suma al intervalo, para que el ritmo no sea
+# perfectamente regular (un patron metronomico tambien delata a un bot).
+DEFAULT_REQUEST_JITTER = 0.2
+# Reintentos ante 429/503/timeout antes de propagar el error al ciclo.
+DEFAULT_MAX_RETRIES = 4
+# Backoff exponencial entre reintentos (segundos) y su techo.
+DEFAULT_RETRY_BACKOFF = 1.0
+DEFAULT_RETRY_BACKOFF_MAX = 60.0
+
 
 def demo_db_path(live_path: str) -> str:
     """Ruta del replica para el modo DEMO: un archivo SEPARADO del de produccion.
@@ -270,6 +521,13 @@ class Settings:
     db_path: str = DEFAULT_DB_PATH
     request_timeout: float = 30.0
     verify_tls: bool = True
+    # Cortesia con el endpoint (ver constantes DEFAULT_REQUEST_* arriba): el
+    # cliente espacia y reintenta sus peticiones para no parecer un ataque.
+    request_min_interval: float = DEFAULT_REQUEST_INTERVAL
+    request_jitter: float = DEFAULT_REQUEST_JITTER
+    max_retries: int = DEFAULT_MAX_RETRIES
+    retry_backoff: float = DEFAULT_RETRY_BACKOFF
+    retry_backoff_max: float = DEFAULT_RETRY_BACKOFF_MAX
     # Sitio a consultar. La API es 'site-scoped': todo cuelga de site(id:).
     # Si site_id queda vacio, el cliente lo auto-descubre via la query `sites`
     # eligiendo aquel cuyo code/description contenga `site_match`.
@@ -302,6 +560,11 @@ class Settings:
             site_match=os.getenv("MSGQ_SITE", "Merian").strip(),
             initial_lookback_days=_int_env("MSGQ_LOOKBACK_DAYS", 7),
             slow_refresh_cycles=_int_env("MSGQ_SLOW_CYCLES", 15),
+            request_min_interval=_float_env("MSGQ_REQUEST_INTERVAL", DEFAULT_REQUEST_INTERVAL),
+            request_jitter=_float_env("MSGQ_REQUEST_JITTER", DEFAULT_REQUEST_JITTER),
+            max_retries=_int_env("MSGQ_MAX_RETRIES", DEFAULT_MAX_RETRIES),
+            retry_backoff=_float_env("MSGQ_RETRY_BACKOFF", DEFAULT_RETRY_BACKOFF),
+            retry_backoff_max=_float_env("MSGQ_RETRY_BACKOFF_MAX", DEFAULT_RETRY_BACKOFF_MAX),
         )
 
     def auth_header(self) -> dict[str, str]:
@@ -320,6 +583,13 @@ class Settings:
 def _int_env(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "").strip() or default)
     except ValueError:
         return default
 
@@ -357,4 +627,11 @@ def load_embedded_settings() -> "Settings | None":
         poll_seconds=int(getattr(ec, "POLL_SECONDS", DEFAULT_POLL_SECONDS)),
         demo_mode=False,
         db_path=str(getattr(ec, "DB_PATH", "") or DEFAULT_DB_PATH),
+        # Cortesia con el endpoint: configurable desde el config embebido, pero
+        # con defaults conservadores (el kiosko corre desatendido contra la API real).
+        request_min_interval=float(getattr(ec, "REQUEST_INTERVAL", DEFAULT_REQUEST_INTERVAL)),
+        request_jitter=float(getattr(ec, "REQUEST_JITTER", DEFAULT_REQUEST_JITTER)),
+        max_retries=int(getattr(ec, "MAX_RETRIES", DEFAULT_MAX_RETRIES)),
+        retry_backoff=float(getattr(ec, "RETRY_BACKOFF", DEFAULT_RETRY_BACKOFF)),
+        retry_backoff_max=float(getattr(ec, "RETRY_BACKOFF_MAX", DEFAULT_RETRY_BACKOFF_MAX)),
     )

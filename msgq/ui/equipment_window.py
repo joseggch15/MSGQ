@@ -21,7 +21,7 @@ import traceback
 from datetime import datetime
 
 import pandas as pd
-from PySide6.QtCore import Qt, QSettings, QTimer
+from PySide6.QtCore import Qt, QSettings, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from msgq import config
+from msgq.core import data_quality as dq
 from msgq.core import equipment_analytics as ea
 from msgq.export import export_sheets
 from msgq.i18n import current_language, set_language, t, tr_fmt, tr_value
@@ -69,6 +70,23 @@ class AuditLogDialog(QDialog):
         lay.addWidget(QLabel(msg))
 
 
+class _DataQualityWorker(QThread):
+    """Corre la auditoría de calidad de datos (variantes + fuzzy O(n²)) en un hilo
+    aparte para no congelar la GUI sobre un maestro grande. Emite el AuditResult."""
+
+    done = Signal(object)   # data_quality.AuditResult, o None si falló
+
+    def __init__(self, eq: pd.DataFrame, parent=None):
+        super().__init__(parent)
+        self._eq = eq
+
+    def run(self) -> None:  # noqa: D401 - QThread entrypoint
+        try:
+            self.done.emit(dq.audit(self._eq))
+        except Exception:  # noqa: BLE001
+            self.done.emit(None)
+
+
 class EquipmentWindow(QMainWindow):
     """Análisis de inventario + auditoría de la flota."""
 
@@ -82,6 +100,11 @@ class EquipmentWindow(QMainWindow):
         self._trans = pd.DataFrame()
         self._rfid_sum = ea.rfid_change_summary(pd.DataFrame())
         self._last_counts = None
+        # Auditoría de calidad de datos: se calcula en segundo plano y sólo cuando
+        # el maestro de equipos cambió (no depende del log de cambios).
+        self._dq = None
+        self._dq_worker: _DataQualityWorker | None = None
+        self._dq_eq_count = None
         self.setWindowTitle(t("MSGQ — Análisis de Equipos  ·  Newmont Merian"))
         self.resize(1420, 880)
 
@@ -96,6 +119,8 @@ class EquipmentWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802 - override Qt
         self._timer.stop()
+        if self._dq_worker is not None and self._dq_worker.isRunning():
+            self._dq_worker.wait(3000)
         event.accept()
 
     # --- Idioma -------------------------------------------------------------
@@ -220,10 +245,34 @@ class EquipmentWindow(QMainWindow):
         self.tabs.addTab(self.tbl_attr, t("Atributos"))
         self.tbl_audit, self.m_audit = make_table()
         self.tabs.addTab(self.tbl_audit, t("Auditoría (quién)"))
-        self.tbl_comp, self.m_comp = make_table()
-        self.tabs.addTab(self.tbl_comp, t("Calidad de datos"))
+        self.tabs.addTab(self._build_quality_tab(), t("Calidad de datos"))
         self.tabs.addTab(self._build_charts_tab(), t("Gráficas"))
         return self.tabs
+
+    def _build_quality_tab(self) -> QWidget:
+        """Auditoría de integridad de los datos maestros: variantes de un mismo
+        valor escrito distinto (Ford/ford/F0RD) y duplicados léxicos (fuzzy), que
+        ensucian las agrupaciones de KPIs gerenciales."""
+        c = QWidget(); lay = QVBoxLayout(c); lay.setContentsMargins(4, 4, 4, 4)
+        self.lbl_dq = QLabel()
+        self.lbl_dq.setTextFormat(Qt.RichText)
+        self.lbl_dq.setWordWrap(True)
+        lay.addWidget(self.lbl_dq)
+        hint = QLabel(t("Auditoría de integridad: «Ford» vs «ford» vs «F0RD» y "
+                        "duplicados por typo ensucian las agrupaciones de KPIs."))
+        hint.setStyleSheet("color:#5A6B7B;")
+        lay.addWidget(hint)
+        inner = QTabWidget()
+        self.tbl_dq_sum, self.m_dq_sum = make_table()
+        inner.addTab(self.tbl_dq_sum, t("Resumen"))
+        self.tbl_dq_var, self.m_dq_var = make_table()
+        inner.addTab(wrap_with_search(self.tbl_dq_var), t("Variantes (mayúsc./espacios)"))
+        self.tbl_dq_fuzzy, self.m_dq_fuzzy = make_table()
+        inner.addTab(wrap_with_search(self.tbl_dq_fuzzy), t("Duplicados léxicos (fuzzy)"))
+        self.tbl_comp, self.m_comp = make_table()
+        inner.addTab(self.tbl_comp, t("Completitud"))
+        lay.addWidget(inner)
+        return c
 
     def _build_rfid_tab(self) -> QWidget:
         c = QWidget(); lay = QVBoxLayout(c)
@@ -355,7 +404,11 @@ class EquipmentWindow(QMainWindow):
 
             self.m_attr.set_dataframe(ea.attribute_change_summary(ch))
             self.m_audit.set_dataframe(ea.audit_by_user(ch))
+
+            # Calidad de datos: completitud es barata (en línea); las variantes y el
+            # fuzzy O(n²) van en segundo plano y sólo si el maestro cambió.
             self.m_comp.set_dataframe(ea.data_completeness(eq_all))
+            self._maybe_run_data_quality(eq_all)
 
             self._update_charts(eq_all, ch, trans)
             self._apply_filters()      # snapshot (inventario + agrupaciones + KPIs)
@@ -388,6 +441,51 @@ class EquipmentWindow(QMainWindow):
             return
         if counts != self._last_counts:
             self._refresh()
+
+    def _maybe_run_data_quality(self, eq_all: pd.DataFrame):
+        """Dispara la auditoría de calidad en segundo plano, sólo si el maestro
+        cambió (o es la primera vez) y no hay otra corriendo."""
+        n = len(eq_all)
+        if self._dq is not None and n == self._dq_eq_count:
+            return                               # maestro sin cambios: reusa
+        if self._dq_worker is not None and self._dq_worker.isRunning():
+            return
+        self._dq_eq_count = n
+        self.lbl_dq.setText(f"<i>{t('Analizando calidad de datos…')}</i>")
+        self._dq_worker = _DataQualityWorker(eq_all, self)
+        self._dq_worker.done.connect(self._on_data_quality_done)
+        self._dq_worker.finished.connect(self._dq_worker.deleteLater)
+        self._dq_worker.start()
+
+    def _on_data_quality_done(self, result):
+        self._dq_worker = None
+        if result is None:
+            self._dq_eq_count = None             # permite reintentar tras un fallo
+            return
+        self._dq = result
+        self.m_dq_sum.set_dataframe(result.summary)
+        self.m_dq_var.set_dataframe(result.variant_detail)
+        self.m_dq_fuzzy.set_dataframe(result.fuzzy)
+        self._update_dq_alert(result.kpis)
+
+    def _update_dq_alert(self, k: dict):
+        """Línea de alerta de Data Quality: roja si hay maestros sucios, verde si no."""
+        groups = k.get("Grupos sucios", 0)
+        fuzzy = k.get("Pares similares", 0)
+        aff = k.get("Equipos afectados", 0)
+        fields = k.get("Campos con problemas", 0)
+        if groups == 0 and fuzzy == 0:
+            self.lbl_dq.setText(
+                f"<span style='color:#2E7D32; font-weight:bold;'>✓ "
+                f"{t('Sin problemas de calidad de datos en los maestros.')}</span>")
+        else:
+            self.lbl_dq.setText(
+                f"<span style='color:#C62828; font-weight:bold;'>⚠ "
+                f"{t('Alerta de calidad de datos')}:</span> &nbsp; "
+                f"{groups:,} {t('grupos con variantes')} &nbsp;·&nbsp; "
+                f"{fuzzy:,} {t('pares similares (fuzzy)')} &nbsp;·&nbsp; "
+                f"{aff:,} {t('equipos afectados')} &nbsp;·&nbsp; "
+                f"{fields:,} {t('campos')}")
 
     def _update_status(self):
         """Barra de estado con indicador de carga del historial."""
@@ -478,6 +576,9 @@ class EquipmentWindow(QMainWindow):
         try:
             eq = self._filtered(self._eq_all)
             ch, eq_all, trans = self._changes, self._eq_all, self._trans
+            # Reusa la auditoría ya calculada en segundo plano; si aún no terminó,
+            # la calcula una vez para el archivo.
+            dq_res = self._dq if self._dq is not None else dq.audit(eq_all)
             # Claves en español canónico: export_sheets las traduce al idioma activo.
             sheets = {
                 "Inventario": eq[[c for c in _INVENTORY_COLS if c in eq.columns]] if not eq.empty else eq,
@@ -499,6 +600,9 @@ class EquipmentWindow(QMainWindow):
                 "Atributos cambiados": ea.attribute_change_summary(ch),
                 "Auditoria usuarios": ea.audit_by_user(ch),
                 "Calidad de datos": ea.data_completeness(eq_all),
+                "Calidad resumen": dq_res.summary,
+                "Calidad variantes": dq_res.variant_detail,
+                "Calidad duplicados": dq_res.fuzzy,
             }
             export_sheets(path, sheets)
             QMessageBox.information(self, t("Exportado"), f"{t('Análisis generado:')}\n{path}")

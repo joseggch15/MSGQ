@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 import httpx
 
@@ -56,7 +57,16 @@ query T($name: String!) {
 """.strip()
 
 
-def _post(client: httpx.Client, endpoint: str, query: str, variables: dict | None = None) -> dict:
+def _post(client: httpx.Client, endpoint: str, query: str, variables: dict | None = None,
+          *, min_interval: float = 0.0) -> dict:
+    # Cortesia con el endpoint: aunque el diagnostico hace pocas peticiones (sin
+    # paginar), las espacia `min_interval` segundos para no contribuir a un patron
+    # de rafaga que un WAF/IDS pudiera marcar. Estado en el atributo de la funcion.
+    if min_interval > 0:
+        wait = (getattr(_post, "_last", 0.0) + min_interval) - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+    _post._last = time.monotonic()
     resp = client.post(endpoint, json={"query": query, "variables": variables or {}})
     if resp.status_code in (401, 403):
         raise SystemExit(f"[AUTH] Token rechazado (HTTP {resp.status_code}). "
@@ -95,9 +105,11 @@ def main(argv: list[str] | None = None) -> int:
                       timeout=settings.request_timeout,
                       verify=settings.verify_tls) as client:
 
+        gap = settings.request_min_interval
+
         # 1) Sites — valida el token y entrega los IDs de sitio.
         print("\n--- Probando conexion (sites) ---")
-        data = _post(client, endpoint, _Q_SITES)
+        data = _post(client, endpoint, _Q_SITES, min_interval=gap)
         sites = data.get("sites") or []
         if sites:
             print("Conexion OK. Sites disponibles:")
@@ -107,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Conexion OK pero no se listaron sites (revisa permisos).")
 
         # 2) Root query + nombres de todos los tipos.
-        data = _post(client, endpoint, _Q_ROOT_AND_TYPES)
+        data = _post(client, endpoint, _Q_ROOT_AND_TYPES, min_interval=gap)
         schema = data.get("__schema") or {}
         root_fields = [f["name"] for f in (schema.get("queryType") or {}).get("fields", [])]
         _print_list("Campos del Root Query", root_fields)
@@ -119,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         # 3) Campos del tipo Site (¿hay conexion de equipos?).
         for type_name in ("Site", "EquipmentItem", "Equipment", "Dispense",
                           "Movement", "MovementQuery", "DispenseTransactionType"):
-            d = _post(client, endpoint, _Q_TYPE_FIELDS, {"name": type_name})
+            d = _post(client, endpoint, _Q_TYPE_FIELDS, {"name": type_name}, min_interval=gap)
             t = d.get("__type")
             if not t:
                 print(f"\n=== Tipo '{type_name}': NO existe en el esquema ===")

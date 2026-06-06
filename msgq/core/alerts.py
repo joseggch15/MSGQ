@@ -20,7 +20,10 @@ from __future__ import annotations
 import pandas as pd
 
 from msgq import config
-from msgq.core import sfl_audit
+from msgq.core import (
+    burn_rate, hardware_health, product_audit, sfl_audit, tag_hopping,
+    volume_deviation,
+)
 from msgq.i18n import tr_fmt
 
 # --- Severidades -----------------------------------------------------------
@@ -210,6 +213,230 @@ def detect_sfl_conflict_alerts(mv: pd.DataFrame, limits: pd.DataFrame) -> pd.Dat
                              fleet_max=float(r.get("fleet_max_sfl") or 0.0)),
             "source_id": r.get("source_id"),
         })
+    return pd.DataFrame(rows, columns=ALERT_COLS).reset_index(drop=True)
+
+
+# ===========================================================================
+# Detector de coherencia Producto <-> Equipo (posible tag clonado)
+# ===========================================================================
+
+def detect_product_mismatch_alerts(mv: pd.DataFrame, limits: pd.DataFrame,
+                                   product_history: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Alertas por despachos cuyo producto es AJENO al equipo (ver
+    `core/product_audit`). Producto de OTRA clase que la del equipo (combustible
+    vs fluido) -> CRITICO (posible tag clonado); mismo-clase fuera del conjunto
+    conocido -> ADVERTENCIA (probable equipo mal configurado en el maestro).
+
+    Requiere TODO el historico de movimientos: la legitimidad de un producto se
+    juzga, entre otras cosas, por su huella de uso en el propio equipo (asi no se
+    marcan productos que estuvieron habilitados y luego se deshabilitaron)."""
+    mm = product_audit.mismatches(mv, limits, product_history)
+    if mm is None or mm.empty:
+        return _empty_alerts()
+    rows = []
+    for _, r in mm.iterrows():
+        if bool(r.get("cross_class")):
+            rows.append({
+                "timestamp": r.get("date"), "severity": SEV_CRITICAL,
+                "category": config.ALERT_PRODUCT_FOREIGN,
+                "equipment_id": r.get("equipment_id"),
+                "equipment_description": r.get("equipment_description"),
+                "type": config.KIND_DISPENSE, "volume": r.get("volume"),
+                "detail": tr_fmt("alert.product_foreign",
+                                 product=r.get("product") or "",
+                                 pclass=r.get("product_class") or "",
+                                 expected=r.get("expected_classes") or "?"),
+                "source_id": r.get("source_id"),
+            })
+        else:
+            rows.append({
+                "timestamp": r.get("date"), "severity": SEV_WARNING,
+                "category": config.ALERT_PRODUCT_OFF_MASTER,
+                "equipment_id": r.get("equipment_id"),
+                "equipment_description": r.get("equipment_description"),
+                "type": config.KIND_DISPENSE, "volume": r.get("volume"),
+                "detail": tr_fmt("alert.product_off_master",
+                                 product=r.get("product") or "",
+                                 expected=r.get("expected_products") or "?"),
+                "source_id": r.get("source_id"),
+            })
+    return pd.DataFrame(rows, columns=ALERT_COLS).reset_index(drop=True)
+
+
+# ===========================================================================
+# Detector de desviacion de volumen en entregas (medidor vs guia)
+# ===========================================================================
+
+def detect_volume_deviation_alerts(mv: pd.DataFrame) -> pd.DataFrame:
+    """Alertas por entregas cuya desviacion entre el volumen MEDIDO y el DIGITADO
+    en campo (de la guia del camion) supera el umbral. >= umbral critico ->
+    CRITICO (sobre-facturacion grave / medidor muy descalibrado); >= umbral base
+    -> ADVERTENCIA. Reutiliza `core/volume_deviation` (ver su docstring)."""
+    fl = volume_deviation.flagged(volume_deviation.deviations(mv))
+    if fl is None or fl.empty:
+        return _empty_alerts()
+    rows = []
+    for _, r in fl.iterrows():
+        dev_pct = float(r.get("deviation_pct") or 0.0)
+        sev = (SEV_CRITICAL if abs(dev_pct) >= config.DELIVERY_VOLUME_DEVIATION_CRITICAL_PCT
+               else SEV_WARNING)
+        rows.append({
+            "timestamp": r.get("date"),
+            "severity": sev,
+            "category": config.ALERT_VOLUME_DEVIATION,
+            "equipment_id": r.get("tank"),
+            "equipment_description": None,
+            "type": r.get("transaction_type") or config.KIND_DELIVERY,
+            "volume": r.get("measured_volume"),
+            "detail": tr_fmt("alert.volume_deviation",
+                             measured=float(r.get("measured_volume") or 0.0),
+                             field=float(r.get("field_volume") or 0.0),
+                             dev=dev_pct,
+                             diff=float(r.get("deviation_l") or 0.0)),
+            "source_id": r.get("source_id"),
+        })
+    return pd.DataFrame(rows, columns=ALERT_COLS).reset_index(drop=True)
+
+
+# ===========================================================================
+# Detector de tag hopping ("el tag en el bolsillo")
+# ===========================================================================
+
+def detect_tag_hopping_alerts(mv: pd.DataFrame, equipment: pd.DataFrame | None = None,
+                              point_coords: dict | None = None) -> pd.DataFrame:
+    """Alertas por el MISMO tag (equipo) despachando en dos lugares en un lapso
+    imposible. Solapamiento temporal o teletransporte -> CRITICO; velocidad
+    implicita implausible -> ADVERTENCIA. Reutiliza `core/tag_hopping` (que mira
+    TODO el historico de despachos para ordenar cada equipo en el tiempo)."""
+    res = tag_hopping.audit(mv, equipment, point_coords)
+    ev = res.events
+    if ev is None or ev.empty:
+        return _empty_alerts()
+    rows = []
+    for _, r in ev.iterrows():
+        by_speed = r.get("reason") == config.TAG_HOP_REASON_SPEED
+        if by_speed:
+            spd = r.get("speed_kmh")
+            metric = (tr_fmt("alert.tag_hop_speed", speed=float(spd),
+                             dist=float(r.get("distance_km") or 0.0))
+                      if spd is not None
+                      else tr_fmt("alert.tag_hop_teleport", dist=float(r.get("distance_km") or 0.0)))
+        else:
+            metric = tr_fmt("alert.tag_hop_overlap")
+        rows.append({
+            "timestamp": r.get("date"),
+            "severity": r.get("severity") or SEV_CRITICAL,
+            "category": config.ALERT_TAG_HOPPING,
+            "equipment_id": r.get("equipment_id"),
+            "equipment_description": r.get("equipment_description"),
+            "type": "TAG",
+            "volume": None,
+            "detail": tr_fmt("alert.tag_hopping",
+                             loc_prev=r.get("location_prev") or "?",
+                             loc=r.get("location") or "?",
+                             gap=float(r.get("gap_min") or 0.0),
+                             metric=metric),
+            "source_id": r.get("source_id"),
+        })
+    return pd.DataFrame(rows, columns=ALERT_COLS).reset_index(drop=True)
+
+
+# ===========================================================================
+# Detector sobre el Burn Rate (consumo L/h)
+# ===========================================================================
+
+def detect_burn_rate_alerts(mv: pd.DataFrame,
+                            equipment: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Alertas por equipos cuyo burn rate se desvía de su categoría. 'Alto'
+    (sobre-consumo: posible fuga/robo/falla) es CRÍTICO; 'Bajo' (sub-consumo:
+    posible medidor mal o despachos sin registrar) es ADVERTENCIA. El burn rate y
+    su línea base se reconstruyen de los despachos (ver `core/burn_rate`)."""
+    res = burn_rate.audit(mv, equipment)
+    eq_anom = res.equipment_anomalies
+    if eq_anom is None or eq_anom.empty:
+        return _empty_alerts()
+    # Fecha del último intervalo por equipo (para datar la alerta).
+    last_date = {}
+    if res.samples is not None and not res.samples.empty:
+        last_date = res.samples.groupby("equipment_id")["date"].max().to_dict()
+    rows = []
+    for _, r in eq_anom.iterrows():
+        eid = r.get("equipment_id")
+        sev = SEV_CRITICAL if r.get("Dirección") == "Alto" else SEV_WARNING
+        rows.append({
+            "timestamp": last_date.get(eid),
+            "severity": sev,
+            "category": config.ALERT_BURN_RATE_ANOMALY,
+            "equipment_id": eid,
+            "equipment_description": r.get("equipment_description"),
+            "type": "BURN_RATE",
+            "volume": None,
+            "detail": tr_fmt("alert.burn_rate",
+                             rate=float(r.get("Burn rate (L/h)") or 0.0),
+                             baseline=float(r.get("Baseline categoría (L/h)") or 0.0),
+                             dev=float(r.get("Desviación %") or 0.0)),
+            "source_id": eid,
+        })
+    return pd.DataFrame(rows, columns=ALERT_COLS).reset_index(drop=True)
+
+
+# ===========================================================================
+# Detector sobre la salud de hardware y sensores
+# ===========================================================================
+
+def detect_hardware_alerts(mv: pd.DataFrame, equipment: pd.DataFrame | None = None,
+                           changes: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Alertas de salud de hardware: SMU en regresión/estancado (CRÍTICO),
+    re-tagueo RFID sospechoso (CRÍTICO) y caudal de medidor degradado
+    (ADVERTENCIA). Reutiliza `core/hardware_health.audit`."""
+    res = hardware_health.audit(mv, equipment, changes)
+    rows: list[dict] = []
+    for _, r in res.smu.iterrows():
+        regression = r.get("tipo") == hardware_health.TYPE_REGRESSION
+        if regression:
+            detail = tr_fmt("alert.smu_regression",
+                            drop=float(r.get("caida") or 0.0),
+                            ref=float(r.get("valor_referencia") or 0.0),
+                            val=float(r.get("valor_smu") or 0.0),
+                            days=int(r.get("dias") or 0))
+            category = config.ALERT_SMU_REGRESSION
+        else:
+            detail = tr_fmt("alert.smu_stagnation",
+                            val=float(r.get("valor_smu") or 0.0),
+                            repeats=int(r.get("repeticiones") or 0),
+                            days=int(r.get("dias") or 0))
+            category = config.ALERT_SMU_STAGNATION
+        rows.append({
+            "timestamp": r.get("date"), "severity": SEV_CRITICAL, "category": category,
+            "equipment_id": r.get("equipment_id"),
+            "equipment_description": r.get("equipment_description"),
+            "type": "SMU", "volume": None, "detail": detail, "source_id": r.get("source_id"),
+        })
+    for _, r in res.retag.iterrows():
+        rows.append({
+            "timestamp": r.get("ultimo_cambio"), "severity": SEV_CRITICAL,
+            "category": config.ALERT_RETAG, "equipment_id": r.get("equipment_id"),
+            "equipment_description": r.get("equipment_description"),
+            "type": "RFID", "volume": None,
+            "detail": tr_fmt("alert.retag", n=int(r.get("cambios_30d") or 0),
+                             window=config.RETAG_WINDOW_DAYS),
+            "source_id": r.get("internal_id"),
+        })
+    degraded = (res.meters[res.meters["degradado"].map(bool)]
+                if not res.meters.empty else res.meters)
+    for _, r in degraded.iterrows():
+        rows.append({
+            "timestamp": None, "severity": SEV_WARNING,
+            "category": config.ALERT_METER_DEGRADED, "equipment_id": r.get("meter_id"),
+            "equipment_description": r.get("meter_description"),
+            "type": "METER", "volume": None,
+            "detail": tr_fmt("alert.meter_degraded", drop=float(r.get("caida_pct") or 0.0),
+                             base=float(r.get("caudal_base") or 0.0),
+                             recent=float(r.get("caudal_reciente") or 0.0)),
+            "source_id": r.get("meter_id"),
+        })
+    if not rows:
+        return _empty_alerts()
     return pd.DataFrame(rows, columns=ALERT_COLS).reset_index(drop=True)
 
 

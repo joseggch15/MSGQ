@@ -109,6 +109,42 @@ MOVEMENT_CONNECTIONS = {
     "transfers":  (TRANSFERS_QUERY, "TRANSFER"),
 }
 
+# --- Campos OPCIONALES del despacho (auditoria de hardware) -----------------
+# No todos los tenants los exponen, asi que NO van fijos en la query: se
+# descubren por introspeccion (igual que la conexion de equipos) y solo se piden
+# los presentes, para no romper la sincronizacion con un nombre inexistente.
+# Clave = nombre del campo en el tipo (lo que devuelve la introspeccion);
+# valor = su seleccion GraphQL.
+OPTIONAL_DISPENSE_FIELDS = {
+    "meter":              "meter { code description erpReference }",
+    "averageFlowRate":    "averageFlowRate",
+    "duration":           "duration",
+    "rawSmuValue":        "rawSmuValue",
+    "calculatedSmuValue": "calculatedSmuValue",
+    "smuSource":          "smuSource",
+    "smuValueSource":     "smuValueSource",
+}
+
+# Tipos candidatos del nodo de despacho para introspeccionar sus campos.
+DISPENSE_TYPE_CANDIDATES = ("Dispense", "Movement")
+
+
+def dispense_type_introspection(type_name: str) -> str:
+    """Query de introspeccion de los campos de un tipo (p. ej. 'Dispense')."""
+    return f'{{ __type(name: "{type_name}") {{ fields {{ name }} }} }}'
+
+
+def build_dispenses_query(optional: set[str] | None = None) -> str:
+    """Arma la query de despachos incluyendo solo los campos opcionales presentes
+    en `optional` (descubiertos por introspeccion). Sin opcionales, equivale a
+    `DISPENSES_QUERY`."""
+    extra = _DISPENSE_EXTRA
+    if optional:
+        picks = [sel for name, sel in OPTIONAL_DISPENSE_FIELDS.items() if name in optional]
+        if picks:
+            extra = extra + "\n        " + "\n        ".join(picks)
+    return _connection_query("dispenses", extra)
+
 # --- Consolas AdaptMAC (conexion paginada en el site) ----------------------
 ADAPTMACS_QUERY = """
 query AdaptMacs($siteId: ID!, $first: Int, $after: String) {

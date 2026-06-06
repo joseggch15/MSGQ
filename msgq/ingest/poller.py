@@ -39,6 +39,13 @@ _RECON_INITIAL_DAYS = 365
 # tambien recupera el historial completo). Ver `_sync_movements`.
 _MOVEMENTS_BACKFILL_FLAG = "movements_backfill_done"
 
+# Version del esquema de movimientos. Al ampliarlo (campos de hardware en v2;
+# `secondary_volume` —volumen digitado de la guia, para auditar desviaciones de
+# entrega— en v3) se fuerza UN re-backfill para poblar los campos nuevos en el
+# historico ya replicado. Subir este numero re-dispara la carga.
+_MOVEMENTS_SCHEMA_FLAG = "movements_schema_version"
+_MOVEMENTS_SCHEMA_VERSION = "3"
+
 
 class Poller(QThread):
     """Hilo de sincronizacion continua FMS -> SQLite."""
@@ -110,6 +117,7 @@ class Poller(QThread):
             stats["equipment"] = eq_n
             stats["consumption_limits"] = cl_n
             stats["rfid_history"] = self._record_rfid_history()
+            stats["product_history"] = self._record_product_history()
             stats["adaptmac"] = await self._sync_master(
                 source, "adaptmac", "fetch_adaptmacs", transform.adaptmacs_to_df)
             stats["tanks"] = await self._sync_master(
@@ -175,6 +183,7 @@ class Poller(QThread):
         replica creada con la logica vieja (ventana corta) ya tiene watermark pero NO
         la marca, por lo que tambien reconstruye todo el historial. Upsert por pagina
         (idempotente)."""
+        self._migrate_movements_schema()
         watermark = self._db.get_watermark("movements")
         backfilled = self._db.get_flag(_MOVEMENTS_BACKFILL_FLAG) == "1"
         if watermark and backfilled:
@@ -208,6 +217,18 @@ class Poller(QThread):
                 "movements", max(state["max_ts"], watermark) if watermark else state["max_ts"])
         self._db.set_flag(_MOVEMENTS_BACKFILL_FLAG, "1")
         return state["rows"]
+
+    def _migrate_movements_schema(self) -> None:
+        """Migracion unica al ampliar el esquema de movimientos con los campos de
+        hardware: fuerza UN re-backfill para poblarlos en el historico. Idempotente
+        (se guarda la version aplicada; corre una sola vez por replica)."""
+        if self._db.get_flag(_MOVEMENTS_SCHEMA_FLAG) == _MOVEMENTS_SCHEMA_VERSION:
+            return
+        self._db.set_flag(_MOVEMENTS_BACKFILL_FLAG, "0")   # invalida el backfill -> re-descarga
+        self._db.set_flag(_MOVEMENTS_SCHEMA_FLAG, _MOVEMENTS_SCHEMA_VERSION)
+        self.status.emit(
+            "Esquema de movimientos actualizado: re-descargando historial para "
+            "poblar los campos de hardware (medidor/caudal/SMU)…")
 
     async def _sync_equipment(self, source) -> tuple[int, int]:
         """Refresca el maestro de equipos y, de los MISMOS nodes (una sola query),
@@ -243,6 +264,18 @@ class Poller(QThread):
         eq = self._db.get_equipment()
         df = transform.rfid_assignments_df(eq, datetime.now())
         return self._db.upsert("rfid_history", df)
+
+    def _record_product_history(self) -> int:
+        """Observa los productos HABILITADOS vigentes (consumption_limits, que el
+        ciclo acaba de refrescar) y acumula el historial de habilitacion
+        producto->equipo (ventanas [first_seen, last_seen]). Permite a la auditoria
+        de coherencia producto<->equipo distinguir un despacho legitimo de uno con
+        producto ajeno, aunque el producto se deshabilite despues (la API no expone
+        ese vinculo temporal). Misma filosofia que `_record_rfid_history`."""
+        limits = self._db.get_consumption_limits()
+        existing = self._db.get_product_history()
+        df = transform.enabled_products_df(limits, existing, datetime.now())
+        return self._db.upsert("product_history", df)
 
     @staticmethod
     def _max_updated(df: pd.DataFrame) -> datetime | None:

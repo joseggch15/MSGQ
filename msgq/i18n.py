@@ -137,6 +137,57 @@ _EN: dict[str, str] = {k: en for k, (_es, en) in _RAW.items()}
 # Severidades de alerta (enum canónico en inglés): forma en español.
 _ES.update({"CRITICAL": "CRÍTICO", "WARNING": "ADVERTENCIA", "INFO": "INFO"})
 
+# Columnas crudas (snake_case) del módulo de Burn Rate: ES y EN.
+_ES.update({
+    "litres": "Litros", "smu_delta": "Δ SMU", "burn_rate": "Burn rate (L/h)",
+    "smu_prev": "SMU previo", "smu_curr": "SMU actual",
+})
+_EN.update({
+    "litres": "Litres", "smu_delta": "SMU Δ", "burn_rate": "Burn rate (L/h)",
+    "smu_prev": "SMU prev", "smu_curr": "SMU curr",
+    # Valores de celda de la columna 'Dirección'.
+    "Alto": "High", "Bajo": "Low",
+})
+
+# Columnas crudas nuevas de movimientos (hardware) + columnas de los frames de
+# salud de hardware (snake_case en español): ES y EN.
+_ES.update({
+    # movimientos: medidor / caudal / SMU crudo
+    "average_flow_rate": "Caudal promedio", "flow_duration_s": "Duración flujo (s)",
+    "meter_id": "Medidor", "meter_description": "Descripción medidor",
+    "meter_erp": "ERP medidor", "raw_smu_value": "SMU crudo",
+    "calculated_smu_value": "SMU calculado", "smu_source": "Fuente SMU",
+    "smu_value_source": "Origen valor SMU",
+    # frames de hardware
+    "tipo": "Tipo", "valor_smu": "Valor SMU", "valor_referencia": "Referencia",
+    "caida": "Caída", "repeticiones": "Repeticiones", "dias": "Días",
+    "cambios_30d": "Cambios (30d)", "primer_cambio": "Primer cambio",
+    "ultimo_cambio": "Último cambio", "ultimo_tag": "Último tag",
+    "metrica": "Métrica", "muestras_base": "Muestras base",
+    "muestras_reciente": "Muestras reciente", "caudal_base": "Caudal base (L/min)",
+    "caudal_reciente": "Caudal reciente (L/min)", "caida_pct": "Caída %",
+    "degradado": "Degradado", "caudal": "Caudal (L/min)",
+    "activo": "Activo", "severidad": "Severidad", "detalle": "Detalle",
+    "fecha": "Fecha", "accion": "Acción",
+})
+_EN.update({
+    "average_flow_rate": "Average flow rate", "flow_duration_s": "Flow duration (s)",
+    "meter_id": "Meter", "meter_description": "Meter description",
+    "meter_erp": "Meter ERP", "raw_smu_value": "Raw SMU",
+    "calculated_smu_value": "Calculated SMU", "smu_source": "SMU source",
+    "smu_value_source": "SMU value source",
+    "tipo": "Type", "valor_smu": "SMU value", "valor_referencia": "Reference",
+    "caida": "Drop", "repeticiones": "Repeats", "dias": "Days",
+    "cambios_30d": "Changes (30d)", "primer_cambio": "First change",
+    "ultimo_cambio": "Last change", "ultimo_tag": "Last tag",
+    "metrica": "Metric", "muestras_base": "Baseline samples",
+    "muestras_reciente": "Recent samples", "caudal_base": "Baseline flow (L/min)",
+    "caudal_reciente": "Recent flow (L/min)", "caida_pct": "Drop %",
+    "degradado": "Degraded", "caudal": "Flow (L/min)",
+    "activo": "Asset", "severidad": "Severity", "detalle": "Detail",
+    "fecha": "Date", "accion": "Action",
+})
+
 # ===========================================================================
 # Cadenas de interfaz y encabezados analíticos: canónico ES -> inglés
 # (en español, `t()` devuelve la propia clave; solo se necesita el inglés)
@@ -568,6 +619,284 @@ _EN.update({
         "Demo data removed from the production replica:",
 })
 
+# --- Auditoría de calidad de datos maestros (dirty data / fuzzy) ------------
+_EN.update({
+    # sub-pestañas
+    "Completitud": "Completeness",
+    "Variantes (mayúsc./espacios)": "Variants (case/spacing)",
+    "Duplicados léxicos (fuzzy)": "Lexical duplicates (fuzzy)",
+    # alerta / encabezado
+    "Analizando calidad de datos…": "Analyzing data quality…",
+    "Alerta de calidad de datos": "Data quality alert",
+    "Sin problemas de calidad de datos en los maestros.":
+        "No data quality issues in master data.",
+    "grupos con variantes": "groups with variants",
+    "pares similares (fuzzy)": "similar pairs (fuzzy)",
+    "equipos afectados": "affected equipment",
+    "campos": "fields",
+    "Auditoría de integridad: «Ford» vs «ford» vs «F0RD» y duplicados por typo "
+    "ensucian las agrupaciones de KPIs.":
+        "Integrity audit: «Ford» vs «ford» vs «F0RD» and typo duplicates dirty the "
+        "KPI groupings.",
+    # encabezados de columna (resumen)
+    "Valores distintos": "Distinct values",
+    "Valores reales": "Real values",
+    "Grupos sucios": "Dirty groups",
+    "Pares similares": "Similar pairs",
+    # encabezados de columna (variantes)
+    "Valor canónico (sugerido)": "Canonical value (suggested)",
+    "Valor canónico": "Canonical value",
+    "Variante": "Variant",
+    "Variantes": "Variants",
+    "¿Canónica?": "Canonical?",
+    "Escrituras": "Spellings",
+    "IDs equipos": "Equipment IDs",
+    # encabezados de columna (fuzzy)
+    "Valor A": "Value A",
+    "Valor B": "Value B",
+    "Equipos A": "Equipment A",
+    "Equipos B": "Equipment B",
+    "Similitud %": "Similarity %",
+    # etiqueta de campo maestro
+    "Centro de costo": "Cost centre",
+    "Modelo": "Model",
+    # nombres de hoja de export
+    "Calidad resumen": "Quality summary",
+    "Calidad variantes": "Quality variants",
+    "Calidad duplicados": "Quality duplicates",
+})
+
+# --- Módulo de Auditoría de Burn Rate (consumo L/h) -------------------------
+_EN.update({
+    "MSGQ — Auditoría de Burn Rate  ·  Newmont Merian":
+        "MSGQ — Burn Rate Audit  ·  Newmont Merian",
+    # botón / tooltip en la ventana principal
+    "Auditar Burn Rate…": "Audit Burn Rate…",
+    "Audita el burn rate (consumo L/h) por equipo y categoría, marca los "
+    "comportamientos anómalos y los grafica, en vivo desde el endpoint.":
+        "Audits the burn rate (L/h consumption) by equipment and category, flags "
+        "anomalous behaviour and charts it, live from the endpoint.",
+    # controles
+    "Auditoría de Burn Rate (consumo L/h)": "Burn Rate audit (L/h consumption)",
+    "Todas": "All",
+    "(automático)": "(automatic)",
+    "Equipo (gráfica):": "Equipment (chart):",
+    "Buscar por ID, descripción, categoría...":
+        "Search by ID, description, category...",
+    # pestañas
+    "Anomalías de equipo": "Equipment anomalies",
+    "Intervalos atípicos": "Atypical intervals",
+    "Muestras": "Samples",
+    # KPIs
+    "Equipos anómalos": "Anomalous equipment",
+    "Equipos analizados": "Analyzed equipment",
+    "Burn rate flota (L/h)": "Fleet burn rate (L/h)",
+    "Intervalos analizados": "Analyzed intervals",
+    "Peor desviación %": "Worst deviation %",
+    # gráficas (títulos / ejes / series)
+    "Burn rate base por categoría (L/h)": "Baseline burn rate by category (L/h)",
+    "Mayor desviación del burn rate (%)": "Largest burn rate deviation (%)",
+    "Burn rate real vs promedio — equipo": "Real vs average burn rate — equipment",
+    "Burn rate real vs promedio": "Real vs average burn rate",
+    "Real": "Actual",
+    "Equipo (mediana)": "Equipment (median)",
+    "Promedio categoría": "Category average",
+    # progreso / estado
+    "intervalos": "intervals",
+    "equipos con burn rate anómalo": "equipment with anomalous burn rate",
+    # encabezados analíticos (columnas de DataFrame en español canónico)
+    "Baseline categoría (L/h)": "Category baseline (L/h)",
+    "Desviación %": "Deviation %",
+    "Z robusto": "Robust z",
+    "Dirección": "Direction",
+    "Litros total": "Total litres",
+    "Anómalo": "Anomalous",
+    "Equipos": "Equipment",
+    "Burn rate base (L/h)": "Baseline burn rate (L/h)",
+    "Dispersión (L/h)": "Spread (L/h)",
+    "Mín equipo (L/h)": "Min equipment (L/h)",
+    "Máx equipo (L/h)": "Max equipment (L/h)",
+    "Anómalos": "Anomalous",
+    "Burn rate típico (L/h)": "Typical burn rate (L/h)",
+    # categoría de alerta (valor de celda en español canónico)
+    "Burn rate anomalo": "Anomalous burn rate",
+    # alarma de escritorio
+    "Alarma: burn rate anómalo": "Alarm: anomalous burn rate",
+    "equipos con burn rate anómalo nuevos": "new equipment with anomalous burn rate",
+    # exportación
+    "Exportar auditoría de Burn Rate": "Export Burn Rate audit",
+    "BurnRate_Auditoria_MSGQ.xlsx": "BurnRate_Audit_MSGQ.xlsx",
+    "Anomalías equipo": "Equipment anomalies",
+})
+
+# --- Módulo de Salud de Hardware y Sensores ---------------------------------
+_EN.update({
+    "MSGQ — Salud de Hardware y Sensores  ·  Newmont Merian":
+        "MSGQ — Hardware & Sensor Health  ·  Newmont Merian",
+    # botón / tooltip ventana principal
+    "Salud de Hardware…": "Hardware Health…",
+    "Audita la salud del hardware: SMU en regresión/estancado, re-tagueo "
+    "RFID sospechoso y degradación de medidores; genera órdenes de trabajo.":
+        "Audits hardware health: SMU regression/stagnation, suspicious RFID "
+        "re-tagging and meter degradation; generates work orders.",
+    "Auditoría de Salud de Hardware y Sensores": "Hardware & Sensor Health audit",
+    # controles
+    "Medidor (gráfica):": "Meter (chart):",
+    "Buscar por ID, descripción, medidor...": "Search by ID, description, meter...",
+    # pestañas
+    "Salud de SMU": "SMU health",
+    "Re-tagueo sospechoso": "Suspicious re-tagging",
+    "Salud de medidores": "Meter health",
+    "Órdenes de trabajo": "Work orders",
+    # nota de medidores no disponibles
+    "El endpoint aún no expone Meter ID / caudal por manguera. La "
+    "auditoría de medidores se activará cuando esos campos lleguen al "
+    "re-sincronizar (las demás auditorías ya funcionan).":
+        "The endpoint does not expose Meter ID / per-hose flow yet. Meter "
+        "auditing will activate once those fields arrive on re-sync (the other "
+        "audits already work).",
+    # gráficas
+    "Caudal del medidor en el tiempo (L/min)": "Meter flow over time (L/min)",
+    "Eventos de SMU por equipo": "SMU events by equipment",
+    "Cambios de RFID por equipo (re-tagueo)": "RFID changes by equipment (re-tagging)",
+    "Caudal del medidor": "Meter flow",
+    "Caudal": "Flow",
+    "Base": "Baseline",
+    # KPIs
+    "SMU en regresión": "SMU regressing",
+    "SMU sin pulsos": "SMU no pulses",
+    "Medidores degradados": "Degraded meters",
+    # estado
+    "órdenes de trabajo de hardware": "hardware work orders",
+    # alarma de escritorio
+    "Alarma: salud de hardware": "Alarm: hardware health",
+    "problemas de hardware nuevos": "new hardware issues",
+    # exportación
+    "Exportar auditoría de hardware": "Export hardware audit",
+    "SaludHardware_MSGQ.xlsx": "HardwareHealth_MSGQ.xlsx",
+    "Re-tagueo": "Re-tagging",
+    "Medidores": "Meters",
+    # categorías de alerta (valores canónicos en español)
+    "SMU en regresion (sensor)": "SMU regressing (sensor)",
+    "SMU estancado (sensor sin pulsos)": "SMU stagnant (sensor sending no pulses)",
+    "Re-tagueo RFID sospechoso": "Suspicious RFID re-tagging",
+    "Caudal de medidor degradado": "Degraded meter flow",
+    # tipos de anomalía de SMU (valores de celda)
+    "Regresión": "Regression",
+    "Estancamiento": "Stagnation",
+    # categorías de alerta: coherencia producto <-> equipo (tag clonado)
+    "Producto ajeno al equipo (posible tag clonado)":
+        "Foreign product for equipment (possible cloned tag)",
+    "Producto fuera del maestro del equipo": "Product not in equipment master",
+})
+
+# --- Módulo de Desviación de Volumen en Entregas + Tag Hopping ---------------
+# Columnas crudas (snake_case) de ambos frames: ES y EN.
+_ES.update({
+    # desviación de volumen
+    "transaction_type": "Tipo de transacción", "measured_volume": "Volumen medido (L)",
+    "field_volume": "Volumen guía (L)", "deviation_l": "Desviación (L)",
+    "deviation_pct": "Desviación %", "direction": "Dirección",
+    "measured_source": "Fuente medido", "field_source": "Fuente guía",
+    "flagged": "Marcada",
+    # tag hopping
+    "tag": "Tag", "date_prev": "Fecha previa", "location_prev": "Lugar previo",
+    "location": "Lugar", "gap_min": "Lapso (min)", "distance_km": "Distancia (km)",
+    "speed_kmh": "Velocidad (km/h)", "reason": "Motivo",
+    "source_id_prev": "ID origen previo",
+})
+_EN.update({
+    "transaction_type": "Transaction type", "measured_volume": "Measured volume (L)",
+    "field_volume": "Field volume (L)", "deviation_l": "Deviation (L)",
+    "deviation_pct": "Deviation %", "direction": "Direction",
+    "measured_source": "Measured source", "field_source": "Field source",
+    "flagged": "Flagged",
+    "tag": "Tag", "date_prev": "Previous date", "location_prev": "Previous location",
+    "location": "Location", "gap_min": "Gap (min)", "distance_km": "Distance (km)",
+    "speed_kmh": "Speed (km/h)", "reason": "Reason",
+    "source_id_prev": "Previous source ID",
+})
+
+# Cadenas de interfaz, KPIs, encabezados analíticos y categorías de alerta
+# (canónico ES -> inglés) de los dos módulos nuevos.
+_EN.update({
+    # --- Desviación de Volumen: ventana / botón ---
+    "MSGQ — Desviación de Volumen (Entregas)  ·  Newmont Merian":
+        "MSGQ — Volume Deviation (Deliveries)  ·  Newmont Merian",
+    "Desviación de volumen…": "Volume deviation…",
+    "Audita la desviación entre el volumen medido y el digitado de la guía en cada "
+    "entrega (sobre-facturación / medidor descalibrado), en vivo desde el endpoint.":
+        "Audits the deviation between measured and field-entered (docket) volume on "
+        "each delivery (overbilling / miscalibrated meter), live from the endpoint.",
+    "Auditoría de desviación de volumen (medidor vs guía)":
+        "Volume deviation audit (meter vs docket)",
+    "Buscar por tanque, producto...": "Search by tank, product...",
+    # pestañas
+    "Marcadas": "Flagged",
+    "Todas las entregas": "All deliveries",
+    "Por tanque": "By tank",
+    # KPIs / encabezados analíticos
+    "Entregas analizadas": "Deliveries analyzed",
+    "Entregas marcadas": "Flagged deliveries",
+    "Volumen en disputa (L)": "Disputed volume (L)",
+    "Sobre-facturación neta (L)": "Net overbilling (L)",
+    "Entregas": "Deliveries",
+    "Volumen medido (L)": "Measured volume (L)",
+    "Volumen guía (L)": "Docket volume (L)",
+    # gráficas
+    "Mayor desviación de volumen por entrega (%)": "Largest volume deviation per delivery (%)",
+    "Volumen medido vs guía por tanque (L)": "Measured vs docket volume by tank (L)",
+    "Medido": "Measured",
+    "Guía": "Docket",
+    # estado / export
+    "Sin entregas con ambos volúmenes en el rango.":
+        "No deliveries with both volumes in range.",
+    "entregas marcadas (medidor vs guía)": "flagged deliveries (meter vs docket)",
+    "Exportar desviaciones de volumen": "Export volume deviations",
+    "DesviacionVolumen_MSGQ.xlsx": "VolumeDeviation_MSGQ.xlsx",
+    "Detalle de entregas": "Delivery detail",
+    # categoría de alerta + valores de celda (dirección)
+    "Desviacion de volumen en entrega (medidor vs guia)":
+        "Delivery volume deviation (meter vs docket)",
+    "Guia sobre lo medido": "Docket over measured",
+    "Guia bajo lo medido": "Docket under measured",
+
+    # --- Tag Hopping: ventana / botón ---
+    "MSGQ — Tag Hopping (el tag en el bolsillo)  ·  Newmont Merian":
+        "MSGQ — Tag Hopping (the tag in the pocket)  ·  Newmont Merian",
+    "Tag Hopping…": "Tag Hopping…",
+    "Audita el mismo tag despachando en dos lugares en un lapso imposible "
+    "(tag removido para robar combustible), en vivo desde el endpoint.":
+        "Audits the same tag dispensing at two places within an impossible window "
+        "(tag removed to steal fuel), live from the endpoint.",
+    "Auditoría de Tag Hopping (mismo tag en dos lugares)":
+        "Tag Hopping audit (same tag in two places)",
+    "Buscar por ID, equipo, lugar...": "Search by ID, equipment, location...",
+    # pestañas
+    "Eventos críticos": "Critical events",
+    "Todos los eventos": "All events",
+    # KPIs
+    "Eventos de tag hopping": "Tag hopping events",
+    "Críticos": "Critical",
+    "Equipos involucrados": "Equipment involved",
+    "Por velocidad GPS": "By GPS speed",
+    # gráficas
+    "Equipos con más eventos de tag hopping": "Equipment with most tag hopping events",
+    # estado / export / alarma
+    "Sin eventos de tag hopping en el rango.": "No tag hopping events in range.",
+    "eventos de tag hopping": "tag hopping events",
+    "Exportar tag hopping": "Export tag hopping",
+    "TagHopping_MSGQ.xlsx": "TagHopping_MSGQ.xlsx",
+    "Eventos": "Events",
+    "Alarma: tag en dos lugares (posible robo)": "Alarm: tag in two places (possible theft)",
+    "eventos de tag hopping nuevos": "new tag hopping events",
+    # categoría de alerta + valores de celda (motivo)
+    "Tag en dos lugares a la vez (posible robo de combustible)":
+        "Tag in two places at once (possible fuel theft)",
+    "Solapamiento temporal": "Time overlap",
+    "Velocidad imposible": "Impossible speed",
+})
+
 # ===========================================================================
 # Valores de celda traducibles (lista blanca) — nunca toca datos reales
 # ===========================================================================
@@ -586,6 +915,22 @@ _VALUE_TOKENS = frozenset({
     "Contaminacion de combustible alta", "Service truck en bypass (volumen acumulado)",
     "Consola en modo bypass", "Consola offline", "Comunicacion stale",
     "Despacho excede Safe Fill Level", "Despacho sin equipo / no autorizado",
+    "Burn rate anomalo",
+    # dirección de la desviación de burn rate (columna 'Dirección')
+    "Alto", "Bajo",
+    # salud de hardware: categorías de alerta + tipos de anomalía de SMU
+    "SMU en regresion (sensor)", "SMU estancado (sensor sin pulsos)",
+    "Re-tagueo RFID sospechoso", "Caudal de medidor degradado",
+    "Regresión", "Estancamiento",
+    # coherencia producto <-> equipo (posible tag clonado)
+    "Producto ajeno al equipo (posible tag clonado)",
+    "Producto fuera del maestro del equipo",
+    # desviacion de volumen en entregas: categoria + direccion (columna 'Dirección')
+    "Desviacion de volumen en entrega (medidor vs guia)",
+    "Guia sobre lo medido", "Guia bajo lo medido",
+    # tag hopping: categoria + motivo (columna 'Motivo')
+    "Tag en dos lugares a la vez (posible robo de combustible)",
+    "Solapamiento temporal", "Velocidad imposible",
 })
 
 # ===========================================================================
@@ -619,6 +964,42 @@ _TPL: dict[str, tuple[str, str]] = {
     "alert.sfl_conflict": (
         "Despacho sin equipo de {volume:,.0f} L ({product}) supera el SFL máximo de flota {fleet_max:,.0f} L",
         "Equipment-less dispense of {volume:,.0f} L ({product}) exceeds fleet max SFL {fleet_max:,.0f} L"),
+    "alert.product_foreign": (
+        "Despacho de {product} ({pclass}) a equipo de tipo {expected}: producto ajeno — posible tag clonado o equipo mal configurado",
+        "Dispense of {product} ({pclass}) to a {expected}-type equipment: foreign product — possible cloned tag or misconfigured equipment"),
+    "alert.product_off_master": (
+        "Despacho de {product} no habilitado para el equipo (esperado: {expected})",
+        "Dispense of {product} not enabled for the equipment (expected: {expected})"),
+    "alert.burn_rate": (
+        "Burn rate {rate:,.0f} L/h vs base {baseline:,.0f} L/h de su categoría ({dev:+.1f}%)",
+        "Burn rate {rate:,.0f} L/h vs category base {baseline:,.0f} L/h ({dev:+.1f}%)"),
+    "alert.smu_regression": (
+        "SMU cayó {drop:,.0f} (de {ref:,.0f} a {val:,.0f}) tras {days} días — sensor roto/manipulado",
+        "SMU dropped {drop:,.0f} (from {ref:,.0f} to {val:,.0f}) after {days} days — sensor broken/tampered"),
+    "alert.smu_stagnation": (
+        "Mismo SMU {val:,.0f} en {repeats} despachos ({days} días) — el sensor no envía pulsos",
+        "Same SMU {val:,.0f} across {repeats} dispenses ({days} days) — sensor sends no pulses"),
+    "alert.retag": (
+        "{n} cambios de RFID en {window} días — posible re-tagueo para forzar manual/bypass",
+        "{n} RFID changes in {window} days — possible re-tagging to force manual/bypass"),
+    "alert.meter_degraded": (
+        "Caudal cayó {drop:.0f}% ({base:,.0f} → {recent:,.0f} L/min) — revisar filtros/bomba",
+        "Flow dropped {drop:.0f}% ({base:,.0f} → {recent:,.0f} L/min) — check filters/pump"),
+    "alert.volume_deviation": (
+        "Entrega: medido {measured:,.0f} L vs guía {field:,.0f} L ({dev:+.1f}%, {diff:+,.0f} L) — posible sobre-facturación o medidor descalibrado",
+        "Delivery: measured {measured:,.0f} L vs docket {field:,.0f} L ({dev:+.1f}%, {diff:+,.0f} L) — possible overbilling or miscalibrated meter"),
+    "alert.tag_hopping": (
+        "Mismo tag en '{loc_prev}' y '{loc}' con {gap:,.0f} min entre medio — {metric}",
+        "Same tag at '{loc_prev}' and '{loc}' {gap:,.0f} min apart — {metric}"),
+    "alert.tag_hop_overlap": (
+        "los despachos se solapan en el tiempo (imposible)",
+        "the dispenses overlap in time (impossible)"),
+    "alert.tag_hop_speed": (
+        "implicaría {speed:,.0f} km/h para {dist:,.1f} km",
+        "would imply {speed:,.0f} km/h over {dist:,.1f} km"),
+    "alert.tag_hop_teleport": (
+        "{dist:,.1f} km sin tiempo entre medio (teletransporte)",
+        "{dist:,.1f} km with no time in between (teleport)"),
     "import.success": (
         "Se cargaron {n:,} equipos desde:\n{file}\n\n"
         "Sugerencia: deja el «Modo demo» apagado para que el simulador no "

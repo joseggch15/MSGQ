@@ -74,10 +74,42 @@ class MainWindow(QMainWindow):
         self._tank_window = None
         self._inv_window = None
         self._sfl_window = None
-        # Alarma de escritorio para despachos sobre Safe Fill Level (SFL).
+        self._burn_window = None
+        self._hw_window = None
+        self._vd_window = None
+        self._th_window = None
+        # Alarma de escritorio para despachos sobre Safe Fill Level (SFL) y para
+        # equipos con burn rate anómalo.
         self._tray = self._make_tray()
         self._seen_sfl_ids: set[str] = set()
         self._sfl_initialized = False
+        self._seen_burn_ids: set[str] = set()
+        self._burn_initialized = False
+        # Cache de alertas de burn rate: el cálculo recorre TODO el histórico de
+        # movimientos, así que solo se recalcula cuando ese conteo cambia (no en
+        # cada refresco visual), para no recorrer la réplica entera de más.
+        self._burn_alerts = al._empty_alerts()
+        self._burn_count: int | None = None
+        # Cache de alertas de hardware (SMU/RFID/medidores), gated por el conteo de
+        # movimientos + cambios (recorre todo el historico de despachos y el log).
+        self._hw_alerts = al._empty_alerts()
+        self._hw_key: tuple | None = None
+        self._seen_hw_ids: set[str] = set()
+        self._hw_initialized = False
+        # Cache de alertas de coherencia producto<->equipo (tag clonado): juzga la
+        # legitimidad de cada producto por su huella de uso en TODO el historico,
+        # asi que se recalcula solo cuando cambia el conteo de movimientos.
+        self._product_alerts = al._empty_alerts()
+        self._product_count: int | None = None
+        # Cache de alertas de desviacion de volumen en entregas (medidor vs guia) y
+        # de tag hopping (mismo tag en dos lugares): ambas recorren todo el historico
+        # de movimientos, asi que se recalculan solo al cambiar su conteo.
+        self._vd_alerts = al._empty_alerts()
+        self._vd_count: int | None = None
+        self._th_alerts = al._empty_alerts()
+        self._th_count: int | None = None
+        self._seen_th_ids: set[str] = set()
+        self._th_initialized = False
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(_REFRESH_MS)
@@ -134,7 +166,9 @@ class MainWindow(QMainWindow):
             self._set_inputs_enabled(not self._monitoring)
         self._last_counts = None
         self._refresh_views(force=True)
-        for child in (self._eq_window, self._tank_window, self._inv_window, self._sfl_window):
+        for child in (self._eq_window, self._tank_window, self._inv_window,
+                      self._sfl_window, self._burn_window, self._hw_window,
+                      self._vd_window, self._th_window):
             if child is not None and child.isVisible():
                 child.rebuild_ui()
 
@@ -236,6 +270,34 @@ class MainWindow(QMainWindow):
             "(sobrellenado), en vivo desde el endpoint."))
         self.btn_sfl.clicked.connect(self._on_open_sfl)
         r3.addWidget(self.btn_sfl)
+        self.btn_burn = QPushButton(t("Auditar Burn Rate…"))
+        self.btn_burn.setObjectName("danger")
+        self.btn_burn.setToolTip(t(
+            "Audita el burn rate (consumo L/h) por equipo y categoría, marca los "
+            "comportamientos anómalos y los grafica, en vivo desde el endpoint."))
+        self.btn_burn.clicked.connect(self._on_open_burn_rate)
+        r3.addWidget(self.btn_burn)
+        self.btn_hw = QPushButton(t("Salud de Hardware…"))
+        self.btn_hw.setObjectName("danger")
+        self.btn_hw.setToolTip(t(
+            "Audita la salud del hardware: SMU en regresión/estancado, re-tagueo "
+            "RFID sospechoso y degradación de medidores; genera órdenes de trabajo."))
+        self.btn_hw.clicked.connect(self._on_open_hardware)
+        r3.addWidget(self.btn_hw)
+        self.btn_vd = QPushButton(t("Desviación de volumen…"))
+        self.btn_vd.setObjectName("danger")
+        self.btn_vd.setToolTip(t(
+            "Audita la desviación entre el volumen medido y el digitado de la guía en cada "
+            "entrega (sobre-facturación / medidor descalibrado), en vivo desde el endpoint."))
+        self.btn_vd.clicked.connect(self._on_open_volume_deviation)
+        r3.addWidget(self.btn_vd)
+        self.btn_th = QPushButton(t("Tag Hopping…"))
+        self.btn_th.setObjectName("danger")
+        self.btn_th.setToolTip(t(
+            "Audita el mismo tag despachando en dos lugares en un lapso imposible "
+            "(tag removido para robar combustible), en vivo desde el endpoint."))
+        self.btn_th.clicked.connect(self._on_open_tag_hopping)
+        r3.addWidget(self.btn_th)
         col.addLayout(r3)
         return box
 
@@ -290,6 +352,58 @@ class MainWindow(QMainWindow):
             return
         self._sfl_window = SFLWindow(self._db, self)
         self._sfl_window.show()
+
+    def _on_open_burn_rate(self):
+        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
+        try:
+            from msgq.ui.burn_rate_window import BurnRateWindow
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self, t("Falta pyqtgraph"),
+                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
+                f"{t('Instala la dependencia: pip install pyqtgraph')}")
+            return
+        self._burn_window = BurnRateWindow(self._db, self)
+        self._burn_window.show()
+
+    def _on_open_hardware(self):
+        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
+        try:
+            from msgq.ui.hardware_window import HardwareWindow
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self, t("Falta pyqtgraph"),
+                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
+                f"{t('Instala la dependencia: pip install pyqtgraph')}")
+            return
+        self._hw_window = HardwareWindow(self._db, self)
+        self._hw_window.show()
+
+    def _on_open_volume_deviation(self):
+        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
+        try:
+            from msgq.ui.volume_deviation_window import VolumeDeviationWindow
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self, t("Falta pyqtgraph"),
+                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
+                f"{t('Instala la dependencia: pip install pyqtgraph')}")
+            return
+        self._vd_window = VolumeDeviationWindow(self._db, self)
+        self._vd_window.show()
+
+    def _on_open_tag_hopping(self):
+        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
+        try:
+            from msgq.ui.tag_hopping_window import TagHoppingWindow
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self, t("Falta pyqtgraph"),
+                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
+                f"{t('Instala la dependencia: pip install pyqtgraph')}")
+            return
+        self._th_window = TagHoppingWindow(self._db, self)
+        self._th_window.show()
 
     def _effective_db_path(self) -> str:
         """Ruta del replica segun el modo: demo en archivo aparte, real en el suyo."""
@@ -350,6 +464,22 @@ class MainWindow(QMainWindow):
         self.btn_sfl.setObjectName("danger")
         self.btn_sfl.clicked.connect(self._on_open_sfl)
         row.addWidget(self.btn_sfl)
+        self.btn_burn = QPushButton(t("Auditar Burn Rate…"))
+        self.btn_burn.setObjectName("danger")
+        self.btn_burn.clicked.connect(self._on_open_burn_rate)
+        row.addWidget(self.btn_burn)
+        self.btn_hw = QPushButton(t("Salud de Hardware…"))
+        self.btn_hw.setObjectName("danger")
+        self.btn_hw.clicked.connect(self._on_open_hardware)
+        row.addWidget(self.btn_hw)
+        self.btn_vd = QPushButton(t("Desviación de volumen…"))
+        self.btn_vd.setObjectName("danger")
+        self.btn_vd.clicked.connect(self._on_open_volume_deviation)
+        row.addWidget(self.btn_vd)
+        self.btn_th = QPushButton(t("Tag Hopping…"))
+        self.btn_th.setObjectName("danger")
+        self.btn_th.clicked.connect(self._on_open_tag_hopping)
+        row.addWidget(self.btn_th)
         return box
 
     def _build_kpi_strip(self) -> QFrame:
@@ -529,11 +659,73 @@ class MainWindow(QMainWindow):
 
         sfl_alerts = al.detect_sfl_alerts(recent, limits)
         sfl_conflicts = al.detect_sfl_conflict_alerts(recent, limits)
+        # Burn rate y salud de hardware: requieren TODO el histórico (intervalos
+        # entre despachos, regresiones de SMU, log de RFID), no solo las 24h. Se
+        # recalculan solo si cambió el conteo de movimientos/cambios; el histórico
+        # de movimientos se lee UNA vez y se reutiliza para ambos.
+        mv_count = counts[0] if counts else None
+        try:
+            chg_count = self._db.row_count("change_events")
+        except Exception:  # noqa: BLE001
+            chg_count = None
+        need_burn = mv_count != self._burn_count
+        need_hw = (mv_count, chg_count) != self._hw_key
+        need_product = mv_count != self._product_count
+        need_vd = mv_count != self._vd_count
+        need_th = mv_count != self._th_count
+        if need_burn or need_hw or need_product or need_vd or need_th:
+            try:
+                mv_all = self._db.read("movements")
+            except Exception:  # noqa: BLE001
+                mv_all = None
+            if mv_all is not None:
+                if need_burn:
+                    try:
+                        self._burn_alerts = al.detect_burn_rate_alerts(mv_all, eq)
+                    except Exception:  # noqa: BLE001
+                        self._burn_alerts = al._empty_alerts()
+                    self._burn_count = mv_count
+                if need_hw:
+                    try:
+                        self._hw_alerts = al.detect_hardware_alerts(
+                            mv_all, eq, self._db.get_change_events())
+                    except Exception:  # noqa: BLE001
+                        self._hw_alerts = al._empty_alerts()
+                    self._hw_key = (mv_count, chg_count)
+                if need_product:
+                    try:
+                        self._product_alerts = al.detect_product_mismatch_alerts(
+                            mv_all, limits, self._db.get_product_history())
+                    except Exception:  # noqa: BLE001
+                        self._product_alerts = al._empty_alerts()
+                    self._product_count = mv_count
+                if need_vd:
+                    try:
+                        self._vd_alerts = al.detect_volume_deviation_alerts(mv_all)
+                    except Exception:  # noqa: BLE001
+                        self._vd_alerts = al._empty_alerts()
+                    self._vd_count = mv_count
+                if need_th:
+                    try:
+                        self._th_alerts = al.detect_tag_hopping_alerts(mv_all, eq)
+                    except Exception:  # noqa: BLE001
+                        self._th_alerts = al._empty_alerts()
+                    self._th_count = mv_count
+        burn_alerts = self._burn_alerts
+        hw_alerts = self._hw_alerts
+        product_alerts = self._product_alerts
+        vd_alerts = self._vd_alerts
+        th_alerts = self._th_alerts
         all_alerts = al.combine(
             al.detect_movement_alerts(recent),
             al.detect_adaptmac_alerts(mac),
             sfl_alerts,
             sfl_conflicts,
+            burn_alerts,
+            hw_alerts,
+            product_alerts,
+            vd_alerts,
+            th_alerts,
         )
         self.m_alerts.set_dataframe(all_alerts)
         self.m_alert_sum.set_dataframe(al.alert_summary(all_alerts))
@@ -541,6 +733,9 @@ class MainWindow(QMainWindow):
         kpis = al.compute_kpis(recent, eq, mac, all_alerts)
         self._refresh_kpis(kpis)
         self._notify_sfl(al.combine(sfl_alerts, sfl_conflicts))
+        self._notify_burn_rate(burn_alerts)
+        self._notify_hardware(hw_alerts)
+        self._notify_tag_hopping(th_alerts)
 
     def _notify_sfl(self, sfl_alerts):
         """Notificación de escritorio (toast) al detectar despachos sobre SFL nuevos.
@@ -566,6 +761,89 @@ class MainWindow(QMainWindow):
         try:
             self._tray.showMessage(
                 t("Alarma: despacho sobre Safe Fill Level"), msg,
+                QSystemTrayIcon.Critical, 10000)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _notify_burn_rate(self, burn_alerts):
+        """Notificación de escritorio al detectar equipos con burn rate anómalo
+        NUEVOS (por equipo). En la primera carga solo memoriza los existentes."""
+        if self._tray is None:
+            return
+        ids = (set() if burn_alerts is None or burn_alerts.empty
+               else set(burn_alerts["source_id"].dropna().astype(str)))
+        if not self._burn_initialized:
+            self._seen_burn_ids = ids
+            self._burn_initialized = True
+            return
+        new = ids - self._seen_burn_ids
+        self._seen_burn_ids |= ids
+        if not new:
+            return
+        new_alerts = burn_alerts[burn_alerts["source_id"].astype(str).isin(new)]
+        if new_alerts.empty:
+            return
+        n = len(new_alerts)
+        detail = str(new_alerts.iloc[0].get("detail") or "")
+        msg = (f"{n} {t('equipos con burn rate anómalo nuevos')} — {detail}" if n > 1 else detail)
+        try:
+            self._tray.showMessage(
+                t("Alarma: burn rate anómalo"), msg, QSystemTrayIcon.Warning, 10000)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _notify_hardware(self, hw_alerts):
+        """Notificación de escritorio al detectar problemas de hardware NUEVOS
+        (sensor SMU, re-tagueo, medidor). En la primera carga solo memoriza."""
+        if self._tray is None:
+            return
+        ids = (set() if hw_alerts is None or hw_alerts.empty
+               else set(hw_alerts["source_id"].dropna().astype(str)))
+        if not self._hw_initialized:
+            self._seen_hw_ids = ids
+            self._hw_initialized = True
+            return
+        new = ids - self._seen_hw_ids
+        self._seen_hw_ids |= ids
+        if not new:
+            return
+        new_alerts = hw_alerts[hw_alerts["source_id"].astype(str).isin(new)]
+        if new_alerts.empty:
+            return
+        n = len(new_alerts)
+        detail = str(new_alerts.iloc[0].get("detail") or "")
+        msg = (f"{n} {t('problemas de hardware nuevos')} — {detail}" if n > 1 else detail)
+        try:
+            self._tray.showMessage(
+                t("Alarma: salud de hardware"), msg, QSystemTrayIcon.Warning, 10000)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _notify_tag_hopping(self, th_alerts):
+        """Notificación de escritorio al detectar eventos de tag hopping NUEVOS
+        (mismo tag en dos lugares en un lapso imposible). En la primera carga solo
+        memoriza los existentes (no notifica el histórico)."""
+        if self._tray is None:
+            return
+        ids = (set() if th_alerts is None or th_alerts.empty
+               else set(th_alerts["source_id"].dropna().astype(str)))
+        if not self._th_initialized:
+            self._seen_th_ids = ids
+            self._th_initialized = True
+            return
+        new = ids - self._seen_th_ids
+        self._seen_th_ids |= ids
+        if not new:
+            return
+        new_alerts = th_alerts[th_alerts["source_id"].astype(str).isin(new)]
+        if new_alerts.empty:
+            return
+        n = len(new_alerts)
+        detail = str(new_alerts.iloc[0].get("detail") or "")
+        msg = (f"{n} {t('eventos de tag hopping nuevos')} — {detail}" if n > 1 else detail)
+        try:
+            self._tray.showMessage(
+                t("Alarma: tag en dos lugares (posible robo)"), msg,
                 QSystemTrayIcon.Critical, 10000)
         except Exception:  # noqa: BLE001
             pass

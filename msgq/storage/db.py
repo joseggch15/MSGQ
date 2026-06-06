@@ -25,7 +25,8 @@ from msgq import config
 # Columnas que se guardan como REAL / como fecha ISO / como booleano (0-1).
 _NUMERIC = {
     "movements": {
-        "volume", "transaction_temperature", "peak_flow_rate", "smu_value",
+        "volume", "secondary_volume", "transaction_temperature", "peak_flow_rate", "smu_value",
+        "average_flow_rate", "flow_duration_s", "raw_smu_value", "calculated_smu_value",
         "cost", "rebate_amount",
         "max_contamination_4", "avg_contamination_4", "med_contamination_4",
         "max_contamination_6", "avg_contamination_6", "med_contamination_6",
@@ -38,6 +39,7 @@ _NUMERIC = {
     "reconciliations": {"opening_stock", "closing_stock", "inflow", "outflow", "error"},
     "rfid_history": set(),
     "consumption_limits": {"sfl"},
+    "product_history": set(),
 }
 _DATETIME = {
     "movements": {"record_collected_at", "created_at", "updated_at"},
@@ -48,6 +50,7 @@ _DATETIME = {
     "reconciliations": {"period_start", "period_end", "updated_at"},
     "rfid_history": {"last_seen"},
     "consumption_limits": set(),
+    "product_history": {"first_seen", "last_seen"},
 }
 _BOOL = {
     "movements": {"is_service_truck"},
@@ -59,6 +62,7 @@ _BOOL = {
     "reconciliations": set(),
     "rfid_history": set(),
     "consumption_limits": set(),
+    "product_history": set(),
 }
 
 # Metadatos por entidad: (tabla, columnas, clave primaria).
@@ -71,6 +75,7 @@ _ENTITIES = {
     "reconciliations": (config.RECONCILIATION_COLS, "id"),
     "rfid_history": (config.RFID_HISTORY_COLS, "tag"),
     "consumption_limits": (config.CONSUMPTION_LIMIT_COLS, "id"),
+    "product_history": (config.PRODUCT_HISTORY_COLS, "key"),
 }
 
 # Columna temporal de cada entidad (para indice y watermark). None = sin tiempo.
@@ -79,6 +84,7 @@ _TS_COL = {
     "adaptmac": "updated_at", "change_events": "changed_at",
     "tanks": None, "reconciliations": "updated_at",
     "rfid_history": "last_seen", "consumption_limits": None,
+    "product_history": "last_seen",
 }
 
 
@@ -262,6 +268,9 @@ class Database:
 
     def get_consumption_limits(self) -> pd.DataFrame:
         return self.read("consumption_limits", order_by='"equipment_id"')
+
+    def get_product_history(self) -> pd.DataFrame:
+        return self.read("product_history", order_by='"equipment_id"')
 
     def row_count(self, entity: str) -> int:
         with self._lock:
