@@ -27,6 +27,9 @@ import httpx
 
 from msgq.api import queries
 from msgq.config import Settings
+from msgq.logging_setup import get_logger
+
+log = get_logger("api")
 
 # Tope (s) para no colgar un ciclo si un `Retry-After` viniera con un valor
 # absurdamente grande: obedecemos al servidor, pero con sentido comun.
@@ -101,6 +104,8 @@ class AdaptIQClient:
             except httpx.TimeoutException as exc:
                 if attempt < self._settings.max_retries:
                     attempt += 1
+                    log.warning("Timeout (intento %d/%d); reintentando…",
+                                attempt, self._settings.max_retries)
                     await self._sleep_backoff(attempt)
                     continue
                 raise TransportError(
@@ -108,6 +113,8 @@ class AdaptIQClient:
             except httpx.HTTPError as exc:
                 if attempt < self._settings.max_retries:
                     attempt += 1
+                    log.warning("Fallo de red '%s' (intento %d/%d); reintentando…",
+                                exc, attempt, self._settings.max_retries)
                     await self._sleep_backoff(attempt)
                     continue
                 raise TransportError(f"Fallo de conexion: {exc}") from exc
@@ -118,14 +125,18 @@ class AdaptIQClient:
             # WAF/IDS escale el bloqueo creyendo que es un ataque sostenido.
             if resp.status_code in (429, 503) and attempt < self._settings.max_retries:
                 attempt += 1
+                log.warning("HTTP %d (rate-limit); respetando Retry-After (intento %d/%d)",
+                            resp.status_code, attempt, self._settings.max_retries)
                 await self._sleep_retry_after(resp, attempt)
                 continue
 
             if resp.status_code in (401, 403):
+                log.error("Autenticacion rechazada (HTTP %d).", resp.status_code)
                 raise AuthError(
                     "Autenticacion rechazada (HTTP %d). Verifica el token en "
                     "'Authorization: Token token=<token>'." % resp.status_code)
             if resp.status_code >= 400:
+                log.error("HTTP %d del endpoint: %s", resp.status_code, resp.text[:200])
                 raise TransportError(f"HTTP {resp.status_code}: {resp.text[:300]}")
 
             try:
@@ -135,6 +146,7 @@ class AdaptIQClient:
 
             if body.get("errors"):
                 messages = "; ".join(str(e.get("message", e)) for e in body["errors"])
+                log.error("GraphQL error: %s", messages)
                 raise GraphQLError(messages)
             return body.get("data") or {}
 
@@ -253,6 +265,7 @@ class AdaptIQClient:
                     break
         chosen = chosen or sites[0]
         self._site_id = str(chosen.get("id"))
+        log.info("Sitio resuelto: id=%s (%s)", self._site_id, chosen.get("description"))
         return self._site_id
 
     # -- contrato DataSource -----------------------------------------------
@@ -272,15 +285,36 @@ class AdaptIQClient:
             out.extend(nodes)
         return out
 
-    async def fetch_movements_paged(self, updated_from: datetime | None, on_page) -> None:
+    async def fetch_movements_paged(
+        self, updated_from: datetime | None, on_page,
+        *, resume: dict | None = None, on_progress=None,
+    ) -> None:
         """Pagina las 3 conexiones de movimientos llamando `on_page(nodes)` por
         pagina (ingesta progresiva). Se usa para el backfill historico del primer
-        arranque sin acumular todo en memoria. Cada node se etiqueta con `kind`."""
+        arranque sin acumular todo en memoria. Cada node se etiqueta con `kind`.
+
+        Backfill REANUDABLE: las conexiones se ordenan por `recordCollectedAt`
+        ascendente, asi que un backfill largo recorre 2022 -> hoy y los datos mas
+        recientes quedan al final. Si el proceso se interrumpe antes de terminar
+        (p. ej. el kiosko se cierra), reiniciar desde el principio re-descargaria
+        todo el historial y podria no llegar nunca a los registros recientes. Para
+        evitarlo se acepta `resume` = {conexion: {"cursor": str|None, "done": bool}}:
+        cada conexion ya completada se omite y las demas continuan desde su cursor.
+        Tras CADA pagina se invoca `on_progress(conexion, end_cursor, has_next)` para
+        que el llamador persista el avance y pueda reanudar en el proximo arranque.
+        Sin `resume`/`on_progress` el comportamiento es el de antes (paginado completo).
+        """
         site_id = await self._resolve_site_id()
         filt = {"updatedFrom": _iso(updated_from)} if updated_from else {}
+        resume = resume or {}
         for connection, (query, kind) in queries.MOVEMENT_CONNECTIONS.items():
+            entry = resume.get(connection) or {}
+            if entry.get("done"):
+                log.debug("Backfill: '%s' ya completa, se omite", connection)
+                continue   # esta conexion ya se backfilleo por completo
             query = await self._movement_query(connection, query)
-            cursor: str | None = None
+            cursor: str | None = entry.get("cursor")
+            page_no = 0
             for _ in range(1_000_000):  # cota de seguridad
                 page_vars: dict[str, Any] = {
                     "siteId": site_id, "filter": filt, "first": self._settings.page_size}
@@ -291,13 +325,18 @@ class AdaptIQClient:
                 nodes = [e["node"] for e in conn.get("edges", []) if e.get("node")]
                 for n in nodes:
                     n["kind"] = kind
+                page_no += 1
+                log.debug("Backfill '%s' pagina %d: %d nodos", connection, page_no, len(nodes))
                 if nodes:
                     on_page(nodes)
                 page_info = conn.get("pageInfo") or {}
-                if not page_info.get("hasNextPage"):
-                    break
                 cursor = page_info.get("endCursor")
-                if not cursor:
+                # 'Terminada' = el servidor no anuncia mas paginas, o no hay cursor
+                # con que continuar (evita un bucle infinito si faltara el endCursor).
+                finished = (not page_info.get("hasNextPage")) or (not cursor)
+                if on_progress is not None:
+                    on_progress(connection, cursor, not finished)
+                if finished:
                     break
 
     async def fetch_equipment(self, updated_from: datetime | None) -> list[dict]:

@@ -817,6 +817,15 @@ _EN.update({
     "source_id_prev": "Previous source ID",
 })
 
+# Exportacion: mensaje claro cuando el archivo destino esta bloqueado (abierto en Excel).
+_EN.update({
+    "Archivo en uso": "File in use",
+    "El archivo está abierto en otro programa (por ejemplo, Excel), así que no se pudo "
+    "guardar. Ciérralo y vuelve a exportar, o elige otro nombre de archivo.":
+        "The file is open in another program (for example, Excel), so it couldn't be "
+        "saved. Close it and export again, or choose a different file name.",
+})
+
 # Cadenas de interfaz, KPIs, encabezados analíticos y categorías de alerta
 # (canónico ES -> inglés) de los dos módulos nuevos.
 _EN.update({

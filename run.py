@@ -11,8 +11,12 @@ Variables de entorno opcionales (todas con prefijo MSGQ_):
 """
 import sys
 
+from msgq.logging_setup import setup_logging
 from msgq.ui import launch
 
 
 if __name__ == "__main__":
+    # Configura el logging ANTES de arrancar la UI, para que toda la actividad
+    # (backend y frontend) se vea en la terminal y quede en logs/msgq.log.
+    setup_logging()
     sys.exit(launch())

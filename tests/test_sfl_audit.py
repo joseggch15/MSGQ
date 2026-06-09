@@ -327,6 +327,93 @@ def test_movements_backfill_runs_despite_existing_watermark():
     print("OK  test_movements_backfill_runs_despite_existing_watermark")
 
 
+class _ResumableFakeSource:
+    """Fuente que pagina cada conexion en varias paginas y puede 'caerse' a mitad
+    (simula que el kiosko se cierra durante el backfill). El cursor es el indice de
+    la proxima pagina, asi se verifica que al reanudar NO se re-descarga lo ya hecho."""
+
+    def __init__(self):
+        self.emitted: list[str] = []        # conexiones realmente emitidas
+        self.crash_after = None             # (conexion, indice_pagina) tras la cual lanzar
+        self._plan = {
+            "dispenses":  [[{"id": "D1", "recordUpdatedAt": "2025-01-01T10:00:00",
+                             "recordCollectedAt": "2025-01-01T10:00:00"}],
+                           [{"id": "D2", "recordUpdatedAt": "2025-02-01T10:00:00",
+                             "recordCollectedAt": "2025-02-01T10:00:00"}]],
+            "deliveries": [[{"id": "V1", "recordUpdatedAt": "2025-01-03T10:00:00",
+                             "recordCollectedAt": "2025-01-03T10:00:00"}],
+                           [{"id": "V2", "recordUpdatedAt": "2025-02-03T10:00:00",
+                             "recordCollectedAt": "2025-02-03T10:00:00"}]],
+            "transfers":  [[{"id": "T1", "recordUpdatedAt": "2025-01-05T10:00:00",
+                             "recordCollectedAt": "2025-01-05T10:00:00"}]],
+        }
+
+    async def fetch_movements_paged(self, updated_from, on_page, *, resume=None, on_progress=None):
+        resume = resume or {}
+        for conn, kind in (("dispenses", "DISPENSE"), ("deliveries", "DELIVERY"),
+                           ("transfers", "TRANSFER")):
+            if (resume.get(conn) or {}).get("done"):
+                continue
+            pages = self._plan[conn]
+            start = int((resume.get(conn) or {}).get("cursor") or 0)
+            for i in range(start, len(pages)):
+                on_page([dict(n, kind=kind) for n in pages[i]])
+                self.emitted.append(conn)
+                has_next = (i + 1) < len(pages)
+                if on_progress is not None:
+                    on_progress(conn, i + 1, has_next)
+                if self.crash_after == (conn, i):
+                    raise RuntimeError("interrupcion simulada")
+
+    async def aclose(self):
+        pass
+
+
+def test_movements_backfill_is_resumable():
+    """Un backfill interrumpido debe REANUDAR donde quedo (no reiniciar desde 2022)
+    y solo marcarse completo cuando TODAS las conexiones terminaron de paginar.
+    Es la causa raiz del hueco de despachos de 2025: el backfill se cortaba antes de
+    llegar a lo reciente y al reiniciar nunca alcanzaba esos registros."""
+    from PySide6.QtCore import QCoreApplication
+    from msgq.ingest.poller import (
+        Poller, _MOVEMENTS_BACKFILL_FLAG, _MOVEMENTS_BACKFILL_STATE)
+
+    QCoreApplication.instance() or QCoreApplication([])
+    db = Database(":memory:")
+    poller = Poller(config.Settings(demo_mode=True, token="", db_path=":memory:"), db)
+    src = _ResumableFakeSource()
+
+    # --- Arranque 1: se cae despues de la 1ra pagina de deliveries -------------
+    src.crash_after = ("deliveries", 0)
+    try:
+        asyncio.run(poller._sync_movements(src))
+    except RuntimeError:
+        pass
+
+    # No se marca completo; el progreso queda persistido para reanudar.
+    assert db.get_flag(_MOVEMENTS_BACKFILL_FLAG) != "1"
+    st = poller._load_backfill_state()
+    assert st["dispenses"]["done"] is True       # dispenses si termino
+    assert st["deliveries"]["done"] is False      # deliveries quedo a medias
+    ids1 = set(db.read("movements")["id"])
+    assert {"D1", "D2", "V1"} <= ids1 and "T1" not in ids1
+
+    # --- Arranque 2: sin caida, debe reanudar sin re-emitir lo ya hecho --------
+    src.emitted.clear()
+    src.crash_after = None
+    asyncio.run(poller._sync_movements(src))
+    asyncio.run(src.aclose())
+
+    assert "dispenses" not in src.emitted          # NO se re-descargo lo ya completado
+    assert "deliveries" in src.emitted and "transfers" in src.emitted
+    ids2 = set(db.read("movements")["id"])
+    assert {"D1", "D2", "V1", "V2", "T1"} <= ids2   # historial completo
+    assert db.get_flag(_MOVEMENTS_BACKFILL_FLAG) == "1"
+    assert not db.get_flag(_MOVEMENTS_BACKFILL_STATE)   # progreso limpiado
+    db.close()
+    print("OK  test_movements_backfill_is_resumable")
+
+
 # ===========================================================================
 # 4. Smoke E2E con el simulador
 # ===========================================================================
@@ -374,6 +461,7 @@ if __name__ == "__main__":
         test_demo_data_isolation_and_purge,
         test_fetch_movements_paged_parity_and_backfill,
         test_movements_backfill_runs_despite_existing_watermark,
+        test_movements_backfill_is_resumable,
         test_e2e_sfl_via_simulator,
     ]
     failed = 0

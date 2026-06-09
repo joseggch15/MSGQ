@@ -79,7 +79,12 @@ def _write_sheet(ws, df: pd.DataFrame) -> None:
 
 
 def export_sheets(path: str, sheets: dict[str, pd.DataFrame]) -> None:
-    """Escribe cada DataFrame en su propia hoja del workbook."""
+    """Escribe cada DataFrame en su propia hoja del workbook.
+
+    Si el archivo destino está abierto en otro programa (típicamente Excel), Windows
+    impide sobrescribirlo y `wb.save` lanza `PermissionError`. Se traduce a un mensaje
+    claro y accionable (cerrar el archivo / elegir otro nombre) en vez de un traceback.
+    """
     wb = Workbook()
     if "Sheet" in wb.sheetnames:
         del wb["Sheet"]
@@ -89,4 +94,10 @@ def export_sheets(path: str, sheets: dict[str, pd.DataFrame]) -> None:
         _write_sheet(ws, df)
     if not wb.sheetnames:
         wb.create_sheet("Vacio")
-    wb.save(path)
+    try:
+        wb.save(path)
+    except PermissionError as exc:
+        raise PermissionError(t(
+            "El archivo está abierto en otro programa (por ejemplo, Excel), así que "
+            "no se pudo guardar. Ciérralo y vuelve a exportar, o elige otro nombre de "
+            "archivo.")) from exc

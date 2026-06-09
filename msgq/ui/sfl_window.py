@@ -51,8 +51,15 @@ class _LoadWorker(QThread):
 
     def run(self) -> None:  # noqa: D401 - QThread entrypoint
         try:
-            movements = self._db.read("movements")
-            limits = self._db.get_consumption_limits()
+            # Conexion de LECTURA propia (create=False): leer ~cientos de miles de
+            # movimientos no debe disputar el lock de escritura del poller (con WAL
+            # esta lectura ve una instantanea consistente sin bloquear la sync).
+            rdb = Database(self._db.path, create=False)
+            try:
+                movements = rdb.read("movements")
+                limits = rdb.get_consumption_limits()
+            finally:
+                rdb.close()
             exc_all = sa.exceedances(movements, limits)
             conf_all = sa.unattributed_conflicts(movements, limits)
             self.done.emit(movements, limits, exc_all, conf_all)
@@ -514,6 +521,9 @@ class SFLWindow(QMainWindow):
                 "Conflictos": self._conf,
             })
             QMessageBox.information(self, t("Exportado"), f"{t('Análisis generado:')}\n{path}")
+        except PermissionError as exc:
+            # Archivo abierto en Excel: mensaje claro y accionable (sin traceback).
+            QMessageBox.warning(self, t("Archivo en uso"), str(exc))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, t("Error al exportar"),
                                  f"{exc}\n\n{traceback.format_exc()}")

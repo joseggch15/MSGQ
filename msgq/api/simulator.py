@@ -89,12 +89,25 @@ class SimulatorSource:
         n = self._rng.randint(3, 12)
         return [self._make_movement() for _ in range(n)]
 
-    async def fetch_movements_paged(self, updated_from: datetime | None, on_page) -> None:
+    async def fetch_movements_paged(
+        self, updated_from: datetime | None, on_page,
+        *, resume: dict | None = None, on_progress=None,
+    ) -> None:
         """Entrega los movimientos por pagina (el demo no tiene historial real, asi
-        que es un solo lote). Mantiene el contrato usado por el backfill del poller."""
-        nodes = await self.fetch_movements(updated_from)
-        if nodes:
-            on_page(nodes)
+        que es un solo lote). Mantiene el contrato del backfill del poller, incluido
+        el de reanudacion: si todas las conexiones ya estan `done` en `resume` no
+        emite nada, y al terminar marca cada conexion como completada via
+        `on_progress` (asi el backfill demo se da por concluido en un solo ciclo)."""
+        resume = resume or {}
+        connections = ("dispenses", "deliveries", "transfers")
+        pending = any(not (resume.get(c) or {}).get("done") for c in connections)
+        if pending:
+            nodes = await self.fetch_movements(updated_from)
+            if nodes:
+                on_page(nodes)
+        if on_progress is not None:
+            for c in connections:                 # has_next=False -> el poller marca done
+                on_progress(c, None, False)
 
     async def fetch_equipment(self, updated_from: datetime | None) -> list[dict]:
         """Primer ciclo: roster completo (forma GraphQL documentada). Luego, pocos."""

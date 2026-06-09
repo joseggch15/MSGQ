@@ -21,6 +21,9 @@ from typing import Any, Iterable
 import pandas as pd
 
 from msgq import config
+from msgq.logging_setup import get_logger
+
+log = get_logger("db")
 
 # Columnas que se guardan como REAL / como fecha ISO / como booleano (0-1).
 _NUMERIC = {
@@ -91,12 +94,30 @@ _TS_COL = {
 class Database:
     """Acceso a la replica SQLite. Crea el esquema si no existe."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, create: bool = True):
+        """Abre (o crea) la replica.
+
+        `create=False` abre una conexion SOLO para LEER, sin recrear el esquema:
+        la usan los workers en segundo plano (p. ej. el calculo de alertas pesadas)
+        para no disputar el lock de escritura del poller/GUI. Con WAL activado, esa
+        conexion lee una instantanea consistente sin bloquear al que escribe.
+        """
         self._path = path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._create_schema()
+        # WAL: permite que un lector (GUI/worker) no bloquee al escritor (poller) y
+        # viceversa — clave para que la interfaz no se congele mientras se sincroniza
+        # un historico grande. busy_timeout: esperar el lock en vez de fallar al toque.
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error as exc:
+            log.warning("No se pudieron aplicar PRAGMAs (WAL/busy_timeout): %s", exc)
+        if create:
+            self._create_schema()
+            log.info("Replica abierta: %s", path)
 
     @property
     def path(self) -> str:

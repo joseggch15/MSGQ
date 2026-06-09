@@ -18,9 +18,10 @@ Ejecutar:  python run.py
 from __future__ import annotations
 
 import os
+import time
 import traceback
 
-from PySide6.QtCore import QSettings, QTimer
+from PySide6.QtCore import QSettings, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
@@ -32,11 +33,14 @@ from msgq.core import alerts as al
 from msgq.i18n import LANGUAGES, current_language, set_language, t, tr_fmt
 from msgq.ingest import Poller
 from msgq.io import load_equipment_csv
+from msgq.logging_setup import get_logger
 from msgq.storage import Database
 from msgq.ui import theme
 from msgq.ui.common import (
     kpi_label, language_selector, make_table, theme_selector, warn_label, wrap_with_search,
 )
+
+log = get_logger("ui.main")
 
 # Colores semánticos de las tarjetas KPI (kpi_label los ajusta al tema activo).
 PRIMARY = "#1F4E78"
@@ -45,6 +49,48 @@ DANGER = "#C62828"
 
 # Refresco visual desacoplado del polling (lee de SQLite).
 _REFRESH_MS = 2000
+
+# Intervalo minimo (s) entre recalculos de las alertas PESADAS (burn rate, hardware,
+# producto, desviacion de volumen, tag hopping). Recorren TODO el historico (sobre
+# cientos de miles de filas tardan minutos), asi que se "debouncean": como mucho una
+# vez cada estos segundos. Antes era 8s, lo que con un calculo de ~130s producia un
+# bucle infinito de recalculos. Configurable por MSGQ_HEAVY_ALERTS_INTERVAL.
+_HEAVY_ALERTS_MIN_INTERVAL = float(os.getenv("MSGQ_HEAVY_ALERTS_INTERVAL", "300"))
+
+
+class _AlertsWorker(QThread):
+    """Dispara el calculo de las alertas pesadas EN OTRO PROCESO y espera el
+    resultado. Por que un proceso y no solo un hilo: los detectores son CPU-bound y
+    de Python puro, asi que por el GIL un QThread NO libera la CPU y la interfaz se
+    congela igual (era la causa real del freeze pese a haberlos pasado a un hilo).
+    Ejecutandolos en un `ProcessPoolExecutor` (otro GIL) la GUI queda 100% fluida.
+    El hilo solo bloquea esperando el future (espera de E/S: libera el GIL)."""
+
+    done = Signal(dict)   # {burn, hw, product, vd, th, counts:(mv,chg)} o {error}
+
+    def __init__(self, db_path: str, executor, parent=None):
+        super().__init__(parent)
+        self._path = db_path
+        self._executor = executor   # ProcessPoolExecutor o None (fallback en-hilo)
+
+    def run(self) -> None:  # noqa: D401 - QThread entrypoint
+        from msgq.core.alert_compute import compute_heavy_alerts
+        out: dict = {}
+        t0 = time.monotonic()
+        try:
+            if self._executor is not None:
+                # Calculo en PROCESO separado: la GUI no se congela aunque tarde minutos.
+                out = self._executor.submit(compute_heavy_alerts, self._path).result()
+                where = "subproceso"
+            else:
+                out = compute_heavy_alerts(self._path)   # fallback (sin pool)
+                where = "en-hilo"
+            log.info("Alertas pesadas (%s) en %.1fs sobre %d movimientos",
+                     where, time.monotonic() - t0, out.get("counts", (0, 0))[0])
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Worker de alertas fallo")
+            out = {"error": str(exc)}
+        self.done.emit(out)
 
 
 class MainWindow(QMainWindow):
@@ -110,6 +156,13 @@ class MainWindow(QMainWindow):
         self._th_count: int | None = None
         self._seen_th_ids: set[str] = set()
         self._th_initialized = False
+        # Worker en segundo plano para las alertas pesadas (no congelar la GUI). El
+        # calculo real corre en un PROCESO aparte (pool perezoso); el GIL hacia que
+        # un simple hilo congelara la UI igual. `_last_heavy_done` marca cuando
+        # termino el ultimo, para el debounce (no relanzar hasta pasado el intervalo).
+        self._alerts_worker: _AlertsWorker | None = None
+        self._alerts_pool = None
+        self._last_heavy_spawn = 0.0
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(_REFRESH_MS)
@@ -569,6 +622,9 @@ class MainWindow(QMainWindow):
         self._poller.start()
         self._refresh_timer.start()
         self._monitoring = True
+        log.info("Monitoreo iniciado (modo=%s, db=%s, poll=%ss)",
+                 "DEMO" if self._settings.demo_mode else "API",
+                 self._db.path, self._settings.poll_seconds)
         if not self._kiosk:
             self.btn_start.setEnabled(False)
             self.btn_stop.setEnabled(True)
@@ -620,11 +676,14 @@ class MainWindow(QMainWindow):
     # Señales del poller
     # =======================================================================
 
-    def _on_cycle(self, _stats: dict):
+    def _on_cycle(self, stats: dict):
         # Refresco inmediato y completo al cerrar un ciclo de sincronizacion.
+        log.info("Ciclo de sync: %s",
+                 ", ".join(f"{k}={v}" for k, v in stats.items()) or "sin cambios")
         self._refresh_views(force=True)
 
     def _on_failed(self, message: str):
+        log.warning("Error de sincronizacion: %s", message)
         self.statusBar().showMessage(f"⚠ {t('Error de sincronizacion')}: {message}")
 
     # =======================================================================
@@ -657,75 +716,110 @@ class MainWindow(QMainWindow):
         self.m_eq.set_dataframe(eq)
         self.m_mac.set_dataframe(mac)
 
-        sfl_alerts = al.detect_sfl_alerts(recent, limits)
-        sfl_conflicts = al.detect_sfl_conflict_alerts(recent, limits)
-        # Burn rate y salud de hardware: requieren TODO el histórico (intervalos
-        # entre despachos, regresiones de SMU, log de RFID), no solo las 24h. Se
-        # recalculan solo si cambió el conteo de movimientos/cambios; el histórico
-        # de movimientos se lee UNA vez y se reutiliza para ambos.
+        # Las alertas PESADAS (burn/hw/producto/desviacion/tag hopping) recorren todo
+        # el historico: se calculan en SEGUNDO PLANO (no congelar la GUI). Aqui solo
+        # se decide si hay que relanzar el worker; el panel se arma con la cache.
         mv_count = counts[0] if counts else None
         try:
             chg_count = self._db.row_count("change_events")
         except Exception:  # noqa: BLE001
             chg_count = None
-        need_burn = mv_count != self._burn_count
-        need_hw = (mv_count, chg_count) != self._hw_key
-        need_product = mv_count != self._product_count
-        need_vd = mv_count != self._vd_count
-        need_th = mv_count != self._th_count
-        if need_burn or need_hw or need_product or need_vd or need_th:
+        need_heavy = (
+            mv_count != self._burn_count
+            or (mv_count, chg_count) != self._hw_key
+            or mv_count != self._product_count
+            or mv_count != self._vd_count
+            or mv_count != self._th_count
+        )
+        if need_heavy:
+            self._maybe_spawn_alerts_worker()
+
+        # Panel de alertas + KPIs con las alertas livianas (24h) + la cache de pesadas.
+        self._update_alert_panel(recent, mac, eq, limits)
+
+    def _alerts_executor(self):
+        """Pool de UN proceso para las alertas pesadas (creado perezosamente). Si no
+        se puede crear (entorno sin multiprocessing), devuelve None y el worker cae a
+        calcular en-hilo (peor para la fluidez, pero las alertas siguen saliendo)."""
+        if self._alerts_pool is None:
             try:
-                mv_all = self._db.read("movements")
-            except Exception:  # noqa: BLE001
-                mv_all = None
-            if mv_all is not None:
-                if need_burn:
-                    try:
-                        self._burn_alerts = al.detect_burn_rate_alerts(mv_all, eq)
-                    except Exception:  # noqa: BLE001
-                        self._burn_alerts = al._empty_alerts()
-                    self._burn_count = mv_count
-                if need_hw:
-                    try:
-                        self._hw_alerts = al.detect_hardware_alerts(
-                            mv_all, eq, self._db.get_change_events())
-                    except Exception:  # noqa: BLE001
-                        self._hw_alerts = al._empty_alerts()
-                    self._hw_key = (mv_count, chg_count)
-                if need_product:
-                    try:
-                        self._product_alerts = al.detect_product_mismatch_alerts(
-                            mv_all, limits, self._db.get_product_history())
-                    except Exception:  # noqa: BLE001
-                        self._product_alerts = al._empty_alerts()
-                    self._product_count = mv_count
-                if need_vd:
-                    try:
-                        self._vd_alerts = al.detect_volume_deviation_alerts(mv_all)
-                    except Exception:  # noqa: BLE001
-                        self._vd_alerts = al._empty_alerts()
-                    self._vd_count = mv_count
-                if need_th:
-                    try:
-                        self._th_alerts = al.detect_tag_hopping_alerts(mv_all, eq)
-                    except Exception:  # noqa: BLE001
-                        self._th_alerts = al._empty_alerts()
-                    self._th_count = mv_count
-        burn_alerts = self._burn_alerts
-        hw_alerts = self._hw_alerts
-        product_alerts = self._product_alerts
-        vd_alerts = self._vd_alerts
-        th_alerts = self._th_alerts
+                from concurrent.futures import ProcessPoolExecutor
+                self._alerts_pool = ProcessPoolExecutor(max_workers=1)
+                log.info("Pool de proceso para alertas pesadas creado.")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("No se pudo crear el pool de proceso (%s); calculo en-hilo.", exc)
+                self._alerts_pool = False   # marca 'intentado y fallo' (no reintentar)
+        return self._alerts_pool or None
+
+    def _maybe_spawn_alerts_worker(self) -> None:
+        """Lanza el worker de alertas pesadas SOLO si: (a) no hay uno corriendo,
+        (b) NO hay un backfill masivo activo (durante el backfill el conteo cambia
+        sin parar y el calculo de minutos se encolaria al infinito), y (c) paso el
+        intervalo de debounce. Asi nunca se recalcula 'en cada pagina que entra'."""
+        if self._alerts_worker is not None and self._alerts_worker.isRunning():
+            return
+        # Durante el backfill historico NO se recalculan las alertas pesadas: los
+        # datos cambian constantemente; se calcularan una vez al completarse.
+        try:
+            if self._db.get_flag("movements_backfill_done") != "1":
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        now = time.monotonic()
+        if now - self._last_heavy_spawn < _HEAVY_ALERTS_MIN_INTERVAL:
+            return
+        self._last_heavy_spawn = now
+        worker = _AlertsWorker(self._db.path, self._alerts_executor(), self)
+        worker.done.connect(self._on_heavy_alerts)
+        worker.finished.connect(worker.deleteLater)
+        self._alerts_worker = worker
+        worker.start()
+
+    def _on_heavy_alerts(self, result: dict) -> None:
+        """Recibe del worker las alertas pesadas ya calculadas y refresca el panel."""
+        self._alerts_worker = None
+        if result.get("error"):
+            self.statusBar().showMessage(
+                f"{t('Error calculando alertas')}: {result['error']}")
+            return
+        self._burn_alerts = result.get("burn", self._burn_alerts)
+        self._hw_alerts = result.get("hw", self._hw_alerts)
+        self._product_alerts = result.get("product", self._product_alerts)
+        self._vd_alerts = result.get("vd", self._vd_alerts)
+        self._th_alerts = result.get("th", self._th_alerts)
+        mv_count, chg_count = result.get("counts", (None, None))
+        self._burn_count = mv_count
+        self._hw_key = (mv_count, chg_count)
+        self._product_count = mv_count
+        self._vd_count = mv_count
+        self._th_count = mv_count
+        # Rearma el panel con la cache recien actualizada (lecturas livianas de 24h).
+        try:
+            recent = self._db.recent_movements(hours=24)
+            mac = self._db.get_adaptmac()
+            eq = self._db.get_equipment()
+            limits = self._db.get_consumption_limits()
+        except Exception as exc:  # noqa: BLE001
+            self.statusBar().showMessage(f"{t('Error leyendo la replica')}: {exc}")
+            return
+        self._update_alert_panel(recent, mac, eq, limits)
+
+    def _update_alert_panel(self, recent, mac, eq, limits) -> None:
+        """Arma el panel de alertas, KPIs y notificaciones combinando las alertas
+        LIVIANAS (movimientos/AdaptMAC/SFL de las ultimas 24h) con la CACHE de las
+        pesadas (que mantiene el worker en segundo plano)."""
+        sfl_alerts = al.detect_sfl_alerts(recent, limits)
+        sfl_conflicts = al.detect_sfl_conflict_alerts(recent, limits)
         all_alerts = al.combine(
             al.detect_movement_alerts(recent),
             al.detect_adaptmac_alerts(mac),
             sfl_alerts,
             sfl_conflicts,
-            burn_alerts,
-            hw_alerts,
-            product_alerts,
-            vd_alerts,
-            th_alerts,
+            self._burn_alerts,
+            self._hw_alerts,
+            self._product_alerts,
+            self._vd_alerts,
+            self._th_alerts,
         )
         self.m_alerts.set_dataframe(all_alerts)
         self.m_alert_sum.set_dataframe(al.alert_summary(all_alerts))
@@ -733,9 +827,9 @@ class MainWindow(QMainWindow):
         kpis = al.compute_kpis(recent, eq, mac, all_alerts)
         self._refresh_kpis(kpis)
         self._notify_sfl(al.combine(sfl_alerts, sfl_conflicts))
-        self._notify_burn_rate(burn_alerts)
-        self._notify_hardware(hw_alerts)
-        self._notify_tag_hopping(th_alerts)
+        self._notify_burn_rate(self._burn_alerts)
+        self._notify_hardware(self._hw_alerts)
+        self._notify_tag_hopping(self._th_alerts)
 
     def _notify_sfl(self, sfl_alerts):
         """Notificación de escritorio (toast) al detectar despachos sobre SFL nuevos.
@@ -875,14 +969,28 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):  # noqa: N802 - override Qt
         self._refresh_timer.stop()
         self._stop_poller()
+        # Espera al worker de alertas en vuelo para no destruirlo en ejecucion.
+        if self._alerts_worker is not None and self._alerts_worker.isRunning():
+            self._alerts_worker.wait(3000)
+        # Cierra el pool de proceso de alertas (evita procesos huerfanos).
+        if self._alerts_pool:
+            try:
+                self._alerts_pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:  # noqa: BLE001
+                pass
         try:
             self._db.close()
         except Exception:  # noqa: BLE001
             pass
+        log.info("Ventana principal cerrada; recursos liberados.")
         event.accept()
 
 
 def launch() -> int:
+    # Asegura el logging aunque se entre por aqui directamente (no via run.py).
+    from msgq.logging_setup import setup_logging
+    setup_logging()
+    log.info("Iniciando MSGQ (interfaz)…")
     app = QApplication.instance() or QApplication([])
     app.setStyle("Fusion")
     app.setOrganizationName("NewmontMerian")
@@ -890,9 +998,11 @@ def launch() -> int:
     try:
         window = MainWindow()
     except Exception:  # noqa: BLE001
+        log.exception("Fallo al construir la ventana principal")
         traceback.print_exc()
         raise
     window.show()
+    log.info("Interfaz lista.")
     return app.exec()
 
 

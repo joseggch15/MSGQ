@@ -13,6 +13,7 @@ se entera de los avances por señales Qt y nunca habla con la API directamente.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from datetime import datetime, timedelta
 
@@ -20,10 +21,13 @@ import pandas as pd
 from PySide6.QtCore import QThread, Signal
 
 from msgq import config
-from msgq.api import make_source
+from msgq.api import make_source, queries
 from msgq.config import Settings
 from msgq.core import transform
+from msgq.logging_setup import get_logger
 from msgq.storage.db import Database
+
+log = get_logger("poller")
 
 # Pequeño solapamiento al usar el watermark como `updated_from`, para no perder
 # registros con timestamp en el limite exacto (el upsert los hace idempotentes).
@@ -38,6 +42,15 @@ _RECON_INITIAL_DAYS = 365
 # anterior de ventana corta (asi una replica creada con la logica vieja de 7 dias
 # tambien recupera el historial completo). Ver `_sync_movements`.
 _MOVEMENTS_BACKFILL_FLAG = "movements_backfill_done"
+
+# Progreso del backfill historico (JSON) para poder REANUDARLO entre arranques.
+# Las conexiones de movimientos se ordenan por `recordCollectedAt` ascendente, asi
+# que los registros recientes (p. ej. los despachos de 2025) quedan al FINAL del
+# recorrido. Un backfill largo que se interrumpe (kiosko que se cierra) y reinicia
+# desde 2022 puede no llegar nunca a ese final -> hueco permanente en lo reciente.
+# Guardando aqui {conexion: {"cursor", "done"}} cada conexion reanuda donde quedo y
+# el backfill se completa a lo largo de varios ciclos/arranques. Ver `_sync_movements`.
+_MOVEMENTS_BACKFILL_STATE = "movements_backfill_state"
 
 # Version del esquema de movimientos. Al ampliarlo (campos de hardware en v2;
 # `secondary_volume` —volumen digitado de la guia, para auditar desviaciones de
@@ -77,12 +90,15 @@ class Poller(QThread):
         source = make_source(self._settings)
         mode = "DEMO (simulador)" if self._settings.demo_mode else "API AdaptIQ"
         self.status.emit(f"Polling iniciado — fuente: {mode}, cada {self._settings.poll_seconds}s")
+        log.info("Poller arrancado — fuente=%s, intervalo=%ss", mode, self._settings.poll_seconds)
 
         cycle_index = 0
         try:
             while not self._stop_event.is_set():
                 try:
+                    t0 = datetime.now()
                     stats = loop.run_until_complete(self._cycle(source, cycle_index))
+                    dt = (datetime.now() - t0).total_seconds()
                     self.cycle_completed.emit(stats)
                     self.status.emit(
                         "Ultima sync %s — mov:%d eq:%d mac:%d"
@@ -90,7 +106,10 @@ class Poller(QThread):
                            stats.get("movements", 0), stats.get("equipment", 0),
                            stats.get("adaptmac", 0))
                     )
+                    log.info("Ciclo #%d en %.1fs — %s", cycle_index, dt,
+                             ", ".join(f"{k}={v}" for k, v in stats.items()))
                 except Exception as exc:  # noqa: BLE001 - errores recuperables
+                    log.exception("Ciclo #%d fallo (recuperable)", cycle_index)
                     self.failed.emit(str(exc))
                 cycle_index += 1
                 # Espera interrumpible hasta el proximo ciclo.
@@ -195,11 +214,19 @@ class Poller(QThread):
                 self._db.set_watermark("movements", max(new_wm, watermark))
             return n
 
-        # Backfill historico completo (carga inicial larga, 1 sola vez): primer
-        # arranque, o replica previa sin la marca de backfill.
+        # Backfill historico completo (carga inicial larga): primer arranque, o
+        # replica previa sin la marca de backfill. Es REANUDABLE: el progreso por
+        # conexion (cursor + done) se persiste tras cada pagina, de modo que si el
+        # proceso se interrumpe, el proximo arranque continua donde quedo en vez de
+        # re-descargar todo el historial desde 2022 (lo que hacia que nunca se
+        # alcanzaran los registros mas recientes). Upsert por pagina (idempotente).
         history_from = datetime.fromisoformat(
             config.MOVEMENTS_HISTORY_START.replace("Z", ""))
+        resume = self._load_backfill_state()
         state: dict = {"rows": 0, "max_ts": None}
+
+        log.info("Backfill historico de movimientos: %s",
+                 "reanudando" if resume else "inicio (desde %s)" % config.MOVEMENTS_HISTORY_START)
 
         def on_page(nodes: list[dict]) -> None:
             df = transform.movements_to_df(nodes)
@@ -210,13 +237,55 @@ class Poller(QThread):
                 state["max_ts"] = ts if state["max_ts"] is None else max(state["max_ts"], ts)
             self.status.emit(
                 f"Sincronizando historial de movimientos… {state['rows']:,}")
+            if state["rows"] % 2000 == 0:
+                log.info("Backfill… %d movimientos en esta pasada", state["rows"])
 
-        await source.fetch_movements_paged(history_from, on_page)
+        def on_progress(connection: str, end_cursor, has_next: bool) -> None:
+            entry = resume.setdefault(connection, {})
+            entry["cursor"] = end_cursor
+            entry["done"] = not has_next
+            self._save_backfill_state(resume)   # persistido para reanudar
+            if not has_next:
+                log.info("Backfill: conexion '%s' completada", connection)
+
+        await source.fetch_movements_paged(
+            history_from, on_page, resume=resume, on_progress=on_progress)
+
         if state["max_ts"] is not None:
+            # El max() acumula el watermark correcto aunque el backfill abarque
+            # varios arranques (cada sesion solo ve su propio maximo).
             self._db.set_watermark(
                 "movements", max(state["max_ts"], watermark) if watermark else state["max_ts"])
-        self._db.set_flag(_MOVEMENTS_BACKFILL_FLAG, "1")
+
+        # Solo se da por terminado el backfill cuando TODAS las conexiones
+        # completaron su paginacion; entonces se libera el incremental por watermark
+        # y se limpia el progreso. Si alguna quedo pendiente, se reanuda el proximo ciclo.
+        all_done = all((resume.get(c) or {}).get("done")
+                       for c in queries.MOVEMENT_CONNECTIONS)
+        if all_done:
+            self._db.set_flag(_MOVEMENTS_BACKFILL_FLAG, "1")
+            self._db.set_flag(_MOVEMENTS_BACKFILL_STATE, "")
+            log.info("Backfill historico COMPLETO (%d movimientos en esta pasada). "
+                     "A partir de aqui, sync incremental por watermark.", state["rows"])
+        else:
+            log.info("Backfill parcial (%d en esta pasada); se reanudara el proximo ciclo.",
+                     state["rows"])
         return state["rows"]
+
+    def _load_backfill_state(self) -> dict:
+        """Lee el progreso persistido del backfill ({conexion: {cursor, done}})."""
+        raw = self._db.get_flag(_MOVEMENTS_BACKFILL_STATE)
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_backfill_state(self, state: dict) -> None:
+        """Persiste el progreso del backfill para poder reanudarlo entre arranques."""
+        self._db.set_flag(_MOVEMENTS_BACKFILL_STATE, json.dumps(state))
 
     def _migrate_movements_schema(self) -> None:
         """Migracion unica al ampliar el esquema de movimientos con los campos de
