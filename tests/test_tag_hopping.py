@@ -92,6 +92,62 @@ def test_same_location_not_flagged():
 
 
 # ===========================================================================
+# 2b. Service truck multi-producto (MISMO camion, tanques distintos) -> NO
+# ===========================================================================
+
+def test_service_truck_multiproduct_not_flagged():
+    """Un service truck (mismo activo TFL0847) entrega diesel y un lubricante al
+    mismo equipo a la vez, desde tanques DISTINTOS del MISMO camion. Mismo lugar
+    fisico = NO es tag hopping (era el falso positivo reportado: los service trucks
+    llevan varios tanques de producto)."""
+    mv = _mv_df([
+        {**_disp("a", "EXC1", "TFL0847 - Diesel - iTank 6", 0, dur_s=600),
+         "product": "DIESEL"},
+        {**_disp("b", "EXC1", "TFL0847 - Tellus S3M46 - iTank 3", 0, dur_s=120),
+         "product": "TELLUS S3M46"},
+    ])
+    assert th.tag_hops(mv).empty
+
+
+# ===========================================================================
+# 2c. Multi-producto en activos DISTINTOS (taller + camion) -> NO
+# ===========================================================================
+
+def test_multiproduct_different_assets_not_flagged():
+    """Lubricante del taller (WS) + diesel de un service truck (TFL0848) al mismo
+    equipo, solapados: PRODUCTOS distintos a la vez = servicio multi-producto, no
+    robo (no puedes verter el mismo combustible en dos lugares: son productos
+    diferentes)."""
+    mv = _mv_df([
+        {**_disp("a", "EXC1", "WS - Compressor Oil S4R68 - iTank 8", 0, dur_s=600),
+         "product": "COMPRESSOR OIL S4R68"},
+        {**_disp("b", "EXC1", "TFL0848 - Diesel - iTank 6", 1, dur_s=120),
+         "product": "DIESEL"},
+    ])
+    assert th.tag_hops(mv).empty
+
+
+# ===========================================================================
+# 2d. MISMO producto en dos camiones distintos, solapado -> SIGUE CRITICO
+# ===========================================================================
+
+def test_same_product_different_trucks_still_flagged():
+    """Mismo producto (diesel) desde dos service trucks DISTINTOS, solapados: el
+    equipo no puede estar en dos camiones a la vez = sigue siendo la senal real de
+    tag hopping (CRITICO). Asegura que el filtro no oculta robos genuinos."""
+    mv = _mv_df([
+        {**_disp("a", "EXC1", "TFL0847 - Diesel - iTank 6", 0, dur_s=600),
+         "product": "DIESEL"},
+        {**_disp("b", "EXC1", "TFL0848 - Diesel - iTank 6", 5, dur_s=120),
+         "product": "DIESEL"},
+    ])
+    ev = th.tag_hops(mv)
+    assert len(ev) == 1
+    assert ev.iloc[0]["severity"] == "CRITICAL"
+    assert ev.iloc[0]["reason"] == config.TAG_HOP_REASON_OVERLAP
+
+
+# ===========================================================================
 # 3. Secuencial sin solapamiento ni coordenadas -> NO se marca
 # ===========================================================================
 
@@ -228,6 +284,9 @@ if __name__ == "__main__":
     tests = [
         test_overlap_different_locations_critical,
         test_same_location_not_flagged,
+        test_service_truck_multiproduct_not_flagged,
+        test_multiproduct_different_assets_not_flagged,
+        test_same_product_different_trucks_still_flagged,
         test_sequential_no_overlap_not_flagged,
         test_gps_speed_impossible_heavy,
         test_gps_speed_ok_for_light_vehicle,

@@ -24,9 +24,18 @@ puebla en los 3 surtidores MOVILES (0,4% de los despachos); por eso la regla de
 solapamiento —que no necesita coordenadas— es la que da cobertura, y la de
 velocidad la complementa donde hay GPS (o donde se carga el mapa opcional).
 
-El "punto de despacho" (la ubicacion) se deriva del `tank` del despacho (dos
-mangueras del mismo tanque = el MISMO lugar, no es hopping); si falta, del
-`meter_id`. `point_coords` (opcional) mapea esa etiqueta de ubicacion -> (lat, lon).
+El "punto de despacho" (la ubicacion) se deriva del ACTIVO surtidor: el PRIMER
+segmento del `tank` ("TFL0847 - Diesel - iTank 6" -> "TFL0847"), no el tanque de
+producto exacto. Asi, dos tanques distintos sobre el MISMO camion/taller/isla son
+el mismo lugar — clave porque los service trucks llevan varios tanques (diesel +
+lubricantes) y entregan a un equipo a la vez sin que eso sea hopping. Si la etiqueta
+es de un medidor ("MER.13.1.6"), colapsa a la consola fisica ("MER.13").
+
+Ademas, el solapamiento temporal solo cuenta como robo si es el MISMO producto en
+ambos puntos: dos productos distintos solapados = servicio multi-producto legitimo
+(no puedes verter el mismo combustible en dos sitios a la vez). La regla de
+velocidad/GPS no filtra por producto (un teletransporte real es imposible igual).
+`point_coords` (opcional) mapea esa etiqueta de ubicacion -> (lat, lon).
 """
 from __future__ import annotations
 
@@ -116,7 +125,8 @@ def _equipment_maps(equipment: pd.DataFrame | None) -> dict[str, dict]:
 
 
 def _location_series(df: pd.DataFrame) -> pd.Series:
-    """Etiqueta de ubicacion por despacho: `tank`; si falta, `meter_id`."""
+    """Etiqueta de ubicacion DETALLADA por despacho (para mostrar): `tank`; si
+    falta, `meter_id`."""
     tank = df["tank"].astype("string").str.strip() if "tank" in df.columns else None
     meter = df["meter_id"].astype("string").str.strip() if "meter_id" in df.columns else None
     if tank is None and meter is None:
@@ -126,6 +136,26 @@ def _location_series(df: pd.DataFrame) -> pd.Series:
     if meter is not None:
         loc = loc.where(~blank, meter)
     return loc
+
+
+def _site_series(loc: pd.Series) -> pd.Series:
+    """Ubicacion FISICA (el activo surtidor: un camion de servicio, el taller, la
+    granja LFO), derivada del PRIMER segmento del `tank`:
+    "TFL0847 - Diesel - iTank 6" -> "TFL0847". Asi, dos tanques de PRODUCTO distintos
+    sobre el MISMO activo —p. ej. un service truck que entrega diesel y un lubricante
+    al mismo equipo a la vez— quedan como el MISMO lugar y NO se marcan como tag
+    hopping (era un falso positivo real: los service trucks llevan varios tanques).
+    Si la etiqueta es de un medidor ("MER.13.1.6", sin " - "), colapsa a la consola
+    fisica ("MER.13"); dos boquillas de la misma consola = el mismo lugar."""
+    s = loc.astype("string").str.strip()
+    # Activo (camion/taller/isla): lo que va antes del primer " - ".
+    site = s.str.split(" - ").str[0].str.strip()
+    # Etiqueta de medidor sin " - " (p. ej. MER.13.1.6): colapsa a consola MER.13.
+    is_meter = ~s.str.contains(" - ", na=False) & s.str.contains(r"^[^.]+\.\d", na=False)
+    console = s.str.split(".").str[:2].str.join(".")
+    site = site.where(~is_meter, console)
+    blank = site.isna() | site.str.upper().isin(_BLANK)
+    return site.where(~blank, s)
 
 
 def tag_hops(movements: pd.DataFrame | None,
@@ -159,6 +189,14 @@ def tag_hops(movements: pd.DataFrame | None,
     d = d[~d["_loc"].isna()].copy()
     if d.empty:
         return _empty(EVENT_COLS)
+    # `_site` = ubicacion FISICA (el activo surtidor) para decidir si hubo cambio de
+    # lugar; `_loc` se conserva solo para MOSTRAR el tanque/medidor exacto.
+    d["_site"] = _site_series(d["_loc"])
+    # Producto normalizado: el solapamiento solo es robo si es el MISMO producto en
+    # dos lugares (dos productos distintos a la vez = servicio multi-producto, legitimo).
+    d["_prod"] = (d["product"].astype("string").str.strip().str.upper()
+                  if "product" in d.columns
+                  else pd.Series(pd.NA, index=d.index, dtype="string"))
 
     dur = (pd.to_numeric(d["flow_duration_s"], errors="coerce")
            if "flow_duration_s" in d.columns else pd.Series(pd.NA, index=d.index))
@@ -176,12 +214,16 @@ def tag_hops(movements: pd.DataFrame | None,
     d["_t_prev"] = g["_t"].shift(1)
     d["_dur_prev"] = g["_dur_s"].shift(1)
     d["_loc_prev"] = g["_loc"].shift(1)
+    d["_site_prev"] = g["_site"].shift(1)
+    d["_prod_prev"] = g["_prod"].shift(1)
     d["_coords_prev"] = g["_coords"].shift(1)
     d["_sid_prev"] = g["_sid"].shift(1)
 
-    # Candidatos: hay previo y la ubicacion cambio (mismo lugar no es hopping).
-    cand = d[d["_t_prev"].notna() & d["_loc_prev"].notna()
-             & (d["_loc"].astype("string") != d["_loc_prev"].astype("string"))]
+    # Candidatos: hay previo y el ACTIVO FISICO cambio. Comparar por `_site` (no por
+    # `_loc`) evita el falso positivo de un service truck que entrega varios productos
+    # —desde tanques distintos del MISMO camion— al mismo equipo a la vez.
+    cand = d[d["_t_prev"].notna() & d["_site_prev"].notna()
+             & (d["_site"].astype("string") != d["_site_prev"].astype("string"))]
     if cand.empty:
         return _empty(EVENT_COLS)
 
@@ -191,9 +233,14 @@ def tag_hops(movements: pd.DataFrame | None,
     for _, r in cand.iterrows():
         gap_s = (r["_t"] - r["_t_prev"]).total_seconds()
         gap_min = gap_s / 60.0
-        # Regla 1 — solapamiento: el actual empieza antes de que termine el previo.
+        # Regla 1 — solapamiento: el actual empieza antes de que termine el previo,
+        # PERO solo cuenta como robo si es el MISMO producto en ambos puntos. Dos
+        # productos distintos solapados = servicio multi-producto (diesel + lubricantes
+        # desde un service truck o el taller al mismo equipo), no robo de combustible.
         overlap_min = (r["_dur_prev"] / 60.0) - gap_min   # min que se solapan
-        is_overlap = overlap_min > slack_min
+        same_product = (not _is_blank(r["_prod"]) and not _is_blank(r["_prod_prev"])
+                        and str(r["_prod"]) == str(r["_prod_prev"]))
+        is_overlap = (overlap_min > slack_min) and same_product
 
         # Regla 2 — velocidad implicita (si hay coordenadas en ambos extremos).
         distance_km = None

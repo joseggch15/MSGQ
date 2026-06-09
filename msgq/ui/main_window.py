@@ -57,6 +57,55 @@ _REFRESH_MS = 2000
 # bucle infinito de recalculos. Configurable por MSGQ_HEAVY_ALERTS_INTERVAL.
 _HEAVY_ALERTS_MIN_INTERVAL = float(os.getenv("MSGQ_HEAVY_ALERTS_INTERVAL", "300"))
 
+# Presets de columnas por TIPO de movimiento. Como en AdaptIQ (pestañas Deliveries /
+# Transfers / Dispenses), cada tipo tiene su propia vista con SUS columnas pertinentes;
+# asi no aparecen campos vacios (p. ej. Equipment ID en una transferencia). El orden
+# replica el de AdaptIQ. Una columna del preset que no exista o quede totalmente vacia
+# en el subconjunto se omite; cualquier columna con datos fuera del preset se anexa al
+# final, para no ocultar nunca informacion real.
+_MOV_KIND_COLS = {
+    "DISPENSE": [
+        "id", "record_collected_at", "equipment_id", "equipment_description",
+        "equipment_status", "smu_value", "smu_type", "volume", "type", "status",
+        "product", "tank", "site", "field_user", "is_service_truck",
+        "cost_centre", "cost", "peak_flow_rate", "average_flow_rate",
+        "flow_duration_s", "meter_id", "meter_description",
+        "transaction_temperature", "created_at", "updated_at",
+    ],
+    "TRANSFER": [
+        "id", "record_collected_at", "type", "product", "volume", "tank", "site",
+        "status", "service_truck", "peak_flow_rate", "transaction_temperature",
+        "created_at", "updated_at",
+    ],
+    "DELIVERY": [
+        "id", "record_collected_at", "tank", "product", "volume",
+        "secondary_volume", "primary_volume_source", "secondary_volume_source",
+        "type", "status", "flow_duration_s", "peak_flow_rate",
+        "transaction_temperature", "created_at", "updated_at",
+    ],
+}
+
+
+def _project_for_kind(df, kind):
+    """Proyecta el preset de columnas del tipo `kind` sobre `df` (ya filtrado a ese
+    tipo). Descarta columnas vacias para ese subconjunto y anexa al final las que
+    tengan datos pero no esten en el preset. Devuelve un DataFrame listo para la tabla."""
+    if df is None or df.empty:
+        return df
+
+    def has_data(col):
+        s = df[col]
+        nonnull = s.notna()
+        if s.dtype == object:
+            nonnull &= s.astype(str).str.strip() != ""
+        return bool(nonnull.any())
+
+    preset = _MOV_KIND_COLS.get(kind, list(df.columns))
+    front = [c for c in preset if c in df.columns and has_data(c)]
+    rest = [c for c in df.columns
+            if c not in preset and c != "kind" and has_data(c)]
+    return df[front + rest]
+
 
 class _AlertsWorker(QThread):
     """Dispara el calculo de las alertas pesadas EN OTRO PROCESO y espera el
@@ -548,8 +597,7 @@ class MainWindow(QMainWindow):
     def _build_tabs(self) -> QTabWidget:
         self.tabs = QTabWidget()
 
-        self.tbl_mov, self.m_mov = make_table()
-        self.tabs.addTab(wrap_with_search(self.tbl_mov), t("Movimientos"))
+        self.tabs.addTab(self._build_movements_tab(), t("Movimientos"))
 
         self.tbl_eq, self.m_eq = make_table()
         self.tabs.addTab(wrap_with_search(self.tbl_eq), t("Equipos"))
@@ -559,6 +607,18 @@ class MainWindow(QMainWindow):
 
         self.tabs.addTab(self._build_alerts_tab(), t("Alertas"))
         return self.tabs
+
+    def _build_movements_tab(self) -> QWidget:
+        """Movimientos divididos por tipo en sub-pestañas, como AdaptIQ (Despachos /
+        Transferencias / Entregas), cada una con sus columnas pertinentes."""
+        sub = QTabWidget()
+        self.tbl_disp, self.m_disp = make_table()
+        sub.addTab(wrap_with_search(self.tbl_disp), t("Despachos"))
+        self.tbl_trans, self.m_trans = make_table()
+        sub.addTab(wrap_with_search(self.tbl_trans), t("Transferencias"))
+        self.tbl_deliv, self.m_deliv = make_table()
+        sub.addTab(wrap_with_search(self.tbl_deliv), t("Entregas"))
+        return sub
 
     def _build_alerts_tab(self) -> QWidget:
         c = QWidget()
@@ -703,7 +763,9 @@ class MainWindow(QMainWindow):
             return
         self._last_counts = counts
         try:
-            mv = self._db.get_movements(limit=1000)
+            disp = self._db.get_movements(limit=1000, kind="DISPENSE")
+            trans = self._db.get_movements(limit=1000, kind="TRANSFER")
+            deliv = self._db.get_movements(limit=1000, kind="DELIVERY")
             eq = self._db.get_equipment()
             mac = self._db.get_adaptmac()
             recent = self._db.recent_movements(hours=24)
@@ -712,7 +774,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"{t('Error leyendo la replica')}: {exc}")
             return
 
-        self.m_mov.set_dataframe(mv)
+        self.m_disp.set_dataframe(_project_for_kind(disp, "DISPENSE"))
+        self.m_trans.set_dataframe(_project_for_kind(trans, "TRANSFER"))
+        self.m_deliv.set_dataframe(_project_for_kind(deliv, "DELIVERY"))
         self.m_eq.set_dataframe(eq)
         self.m_mac.set_dataframe(mac)
 

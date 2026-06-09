@@ -45,6 +45,7 @@ _RAW: dict[str, tuple[str, str]] = {
     "type": ("Modo", "Type"),
     "status": ("Estado", "Status"),
     "volume": ("Volumen", "Volume"),
+    "secondary_volume": ("Volumen secundario", "Secondary volume"),
     "record_collected_at": ("Recolectado", "Collected at"),
     "created_at": ("Creado", "Created at"),
     "updated_at": ("Actualizado", "Updated at"),
@@ -227,6 +228,9 @@ _EN.update({
     "Sin datos todavia.": "No data yet.",
     # --- pestañas / chrome general ---
     "Movimientos": "Movements",
+    # Sub-pestañas de Movimientos por tipo (replican Deliveries/Transfers/Dispenses
+    # de AdaptIQ). "Despachos"/"Entregas" ya tienen mapeo EN abajo; falta Transferencias.
+    "Transferencias": "Transfers",
     "Equipos": "Equipment",
     "Consolas AdaptMAC": "AdaptMAC consoles",
     "Alertas": "Alerts",

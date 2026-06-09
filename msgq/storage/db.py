@@ -258,8 +258,13 @@ class Database:
             rows = [dict(r) for r in cur.fetchall()]
         return self._records_to_df(entity, rows, cols)
 
-    def get_movements(self, limit: int = 500) -> pd.DataFrame:
-        return self.read("movements", order_by='"updated_at" DESC', limit=limit)
+    def get_movements(self, limit: int = 500, kind: str | None = None) -> pd.DataFrame:
+        # `kind` (DISPENSE/TRANSFER/DELIVERY) permite poblar cada sub-pestana de
+        # Movimientos por separado (como AdaptIQ), sin mezclar tipos en una tabla.
+        where = '"kind" = ?' if kind else ""
+        params = (kind,) if kind else ()
+        return self.read("movements", where=where, params=params,
+                         order_by='"updated_at" DESC', limit=limit)
 
     def recent_movements(self, hours: int = 24) -> pd.DataFrame:
         cutoff = (pd.Timestamp.now() - pd.Timedelta(hours=hours)).isoformat()
