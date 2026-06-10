@@ -75,6 +75,10 @@ class _LoadWorker(QThread):
                 changes = rdb.get_change_events(config.CHANGE_RECORD_RFID)
                 movements = rdb.read("movements", columns=self._MOVEMENT_COLS)
                 history = rdb.get_rfid_history()
+                # Limites por equipo/producto: la fuente PRIMARIA de la columna
+                # Product (productos habilitados, como AdaptIQ); sin despachos
+                # el producto salia vacio.
+                limits = rdb.get_consumption_limits()
                 counts = (rdb.row_count("equipment"),
                           rdb.row_count("change_events"),
                           rdb.row_count("movements"),
@@ -82,7 +86,8 @@ class _LoadWorker(QThread):
             finally:
                 rdb.close()
             report = ri.installation_report(
-                changes, eq, movements, self._from, self._to, history)
+                changes, eq, movements, self._from, self._to, history,
+                limits=limits)
             self.done.emit({"eq": eq, "changes": changes, "movements": movements,
                             "history": history, "report": report, "counts": counts})
         except Exception as exc:  # noqa: BLE001

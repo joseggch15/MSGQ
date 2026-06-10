@@ -190,6 +190,62 @@ def test_product_map_uses_mode():
     print("OK  test_product_map_uses_mode")
 
 
+def _limits_df(rows: list[dict]) -> pd.DataFrame:
+    base = [{**{c: pd.NA for c in config.CONSUMPTION_LIMIT_COLS}, **r} for r in rows]
+    return pd.DataFrame(base, columns=config.CONSUMPTION_LIMIT_COLS)
+
+
+def test_product_map_prefers_enabled_products():
+    """El producto HABILITADO (consumption_limits, 'Products consumed' de
+    AdaptIQ) manda sobre el inferido por despachos, y cubre a los equipos
+    recien tagueados SIN despachos (antes la columna Product salia vacia)."""
+    mv = _movements_df([
+        {"id": "a", "kind": config.KIND_DISPENSE, "equipment_id": "EQ1", "product": "Diesel"},
+    ])
+    lim = _limits_df([
+        # EQ1 con dos productos habilitados -> se unen ordenados.
+        {"id": "l1", "equipment_id": "EQ1", "product": "Diesel", "sfl": 400.0},
+        {"id": "l2", "equipment_id": "EQ1", "product": "15W40", "sfl": 20.0},
+        # EQ9: SIN despachos (equipo nuevo) -> el producto sale del limite.
+        {"id": "l3", "equipment_id": "EQ9", "product": "Diesel", "sfl": 400.0},
+    ])
+    pm = ri.equipment_product_map(mv, lim)
+    assert pm["EQ1"] == "15W40, Diesel"
+    assert pm["EQ9"] == "Diesel"
+    # Sin limites se conserva el comportamiento previo (mas despachado).
+    assert ri.equipment_product_map(mv)["EQ1"] == "Diesel"
+    print("OK  test_product_map_prefers_enabled_products")
+
+
+def test_report_product_from_limits_and_duplicate_master_bridge():
+    """Caso real C-SE-12: el maestro tiene el equipo DUPLICADO ('C- SE-12' con
+    espacio y 'C-SE-12' sin el, mismo tag), el limite de producto cuelga solo
+    de la variante sin espacio y el equipo no ha despachado nunca. El reporte
+    debe mostrar igualmente el producto asignado (puente por id compacto)."""
+    eq = _equipment_df([
+        {"equipment_id": "C- SE-12", "internal_id": "10",
+         "description": "General Contractor - SEMC", "status": config.STATUS_OUT,
+         "cost_centre": "10001519", "department": "SUSTAINING CAPEX",
+         "rfid": "56B59209"},
+        {"equipment_id": "C-SE-12", "internal_id": "11",
+         "description": "General Contractor - SEMC", "status": config.STATUS_OUT,
+         "cost_centre": "10001519", "department": "SUSTAINING CAPEX",
+         "rfid": "56B59209"},
+    ])
+    lim = _limits_df([
+        {"id": "l1", "equipment_id": "C-SE-12", "product": "Diesel", "sfl": 400.0},
+    ])
+    ch = _changes_df([
+        _rfid(pd.Timestamp("2026-06-09 10:00:00"), "201", None, "56B59209"),
+    ])
+    rep = ri.installation_report(ch, eq, _movements_df([]), limits=lim)
+    assert len(rep) == 1
+    row = rep.iloc[0]
+    assert row["TYPE"] == config.TYPE_NEW
+    assert row["Product"] == "Diesel"        # via limite + puente de duplicado
+    print("OK  test_report_product_from_limits_and_duplicate_master_bridge")
+
+
 # ===========================================================================
 # 3. Validaciones
 # ===========================================================================
@@ -378,6 +434,8 @@ if __name__ == "__main__":
         test_date_range_filters_events,
         test_summary_kpis,
         test_product_map_uses_mode,
+        test_product_map_prefers_enabled_products,
+        test_report_product_from_limits_and_duplicate_master_bridge,
         test_validation_duplicate_tags_in_master,
         test_validation_out_of_service_and_incomplete,
         test_validation_duplicate_ids_retag,

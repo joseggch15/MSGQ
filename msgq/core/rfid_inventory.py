@@ -91,42 +91,79 @@ def _split_tags(raw) -> list[str]:
 # Enlace tag -> equipo  (por valor, contra el maestro actual)
 # ===========================================================================
 
-def equipment_product_map(movements: pd.DataFrame | None) -> dict:
-    """Producto mas despachado por equipo, desde el historial de movimientos.
+def _compact_id(eq_id) -> str:
+    """Variante sin espacios internos de un equipment_id, para puentear los
+    registros DUPLICADOS del maestro del FMS (p. ej. 'C- SE-12' vs 'C-SE-12',
+    mismo activo fisico y mismo tag, pero los limites de producto cuelgan de
+    una sola de las dos variantes)."""
+    return "".join(str(eq_id).split())
 
-    Devuelve {equipment_id (str): product}. Cubre la columna Product del reporte,
-    que el API no entrega en EquipmentItem (el producto va por-movimiento).
+
+def equipment_product_map(movements: pd.DataFrame | None,
+                          limits: pd.DataFrame | None = None) -> dict:
+    """Producto(s) por equipo: {equipment_id (str): product}.
+
+    Fuente primaria: los productos HABILITADOS del equipo (`consumption_limits`,
+    replicado de `EquipmentItem.consumptionTanks` — el panel 'Products consumed'
+    de AdaptIQ). Asi el producto sale aunque el equipo sea nuevo y no haya
+    despachado nunca; varios productos se unen con ', '. Respaldo: el producto
+    MAS despachado segun el historial de movimientos (comportamiento previo),
+    para equipos sin limite cargado en el FMS. Incluye alias sin espacios
+    internos para resolver duplicados del maestro (ver `_compact_id`).
     """
-    if movements is None or movements.empty:
-        return {}
-    if "equipment_id" not in movements.columns or "product" not in movements.columns:
-        return {}
-    df = movements.copy()
-    if "kind" in df.columns:   # preferir despachos (el producto del repostaje)
-        disp = df[df["kind"] == config.KIND_DISPENSE]
-        if not disp.empty:
-            df = disp
-    df = df[df["equipment_id"].map(_present) & df["product"].map(_present)]
-    if df.empty:
-        return {}
-    df["equipment_id"] = df["equipment_id"].astype("string")
     out: dict = {}
-    for eq_id, chunk in df.groupby("equipment_id"):
-        mode = chunk["product"].mode()
-        if not mode.empty:
-            out[str(eq_id)] = mode.iloc[0]
+
+    # 1) Productos habilitados (lo que AdaptIQ muestra como asignado al equipo).
+    if (limits is not None and not limits.empty
+            and {"equipment_id", "product"}.issubset(limits.columns)):
+        lim = limits[limits["equipment_id"].map(_present)
+                     & limits["product"].map(_present)]
+        prods: dict[str, list[str]] = {}
+        for eid, p in zip(lim["equipment_id"], lim["product"]):
+            vals = prods.setdefault(str(eid), [])
+            if str(p) not in vals:
+                vals.append(str(p))
+        out = {k: ", ".join(sorted(v)) for k, v in prods.items()}
+
+    # 2) Respaldo: el mas despachado del historial (solo equipos sin limite).
+    if (movements is not None and not movements.empty
+            and {"equipment_id", "product"}.issubset(movements.columns)):
+        df = movements
+        if "kind" in df.columns:   # preferir despachos (el producto del repostaje)
+            disp = df[df["kind"] == config.KIND_DISPENSE]
+            if not disp.empty:
+                df = disp
+        df = df[df["equipment_id"].map(_present) & df["product"].map(_present)]
+        if not df.empty:
+            df = df.copy()
+            df["equipment_id"] = df["equipment_id"].astype("string")
+            for eq_id, chunk in df.groupby("equipment_id"):
+                mode = chunk["product"].mode()
+                if not mode.empty:
+                    out.setdefault(str(eq_id), mode.iloc[0])
+
+    # 3) Alias compactos: una clave con espacios internos tambien responde por
+    # su variante compacta (no pisa claves reales existentes).
+    for key, val in list(out.items()):
+        alias = _compact_id(key)
+        if alias != key and alias not in out:
+            out[alias] = val
     return out
 
 
 def _equipment_attrs(e, prod: dict) -> dict:
     """Atributos del equipo que viajan al reporte (ID + cost centre/depto/producto
-    + columnas de soporte _*)."""
+    + columnas de soporte _*). El producto intenta el id exacto y luego su
+    variante compacta (duplicados del maestro: 'C- SE-12' -> 'C-SE-12')."""
     eq_id = e.get("equipment_id")
+    product = prod.get(str(eq_id))
+    if product is None:
+        product = prod.get(_compact_id(eq_id))
     return {
         "ID":          eq_id,
         "Cost Center": e.get("cost_centre"),
         "Department":  e.get("department"),
-        "Product":     prod.get(str(eq_id)),
+        "Product":     product,
         "_Status":     e.get("status"),
         "_Category":   e.get("category"),
         "_Group":      e.get("group"),
@@ -135,17 +172,19 @@ def _equipment_attrs(e, prod: dict) -> dict:
 
 
 def tag_lookup(equipment: pd.DataFrame | None,
-               movements: pd.DataFrame | None = None) -> dict:
+               movements: pd.DataFrame | None = None,
+               limits: pd.DataFrame | None = None) -> dict:
     """Mapa {TAG_MAYUSCULAS: atributos del equipo} desde el maestro ACTUAL.
 
     Cada equipo puede tener mas de un tag (`rfid` separado por comas). El producto
-    se toma de `equipment_product_map`. Si el mismo tag estuviera en dos equipos,
-    gana el primero (la duplicidad la reporta la validacion de tags duplicados).
+    se toma de `equipment_product_map` (habilitados del FMS -> mas despachado).
+    Si el mismo tag estuviera en dos equipos, gana el primero (la duplicidad la
+    reporta la validacion de tags duplicados).
     """
     out: dict = {}
     if equipment is None or equipment.empty or "rfid" not in equipment.columns:
         return out
-    prod = equipment_product_map(movements)
+    prod = equipment_product_map(movements, limits)
     for _, e in equipment.iterrows():
         attrs = _equipment_attrs(e, prod)
         for tag in _split_tags(e.get("rfid")):
@@ -156,14 +195,15 @@ def tag_lookup(equipment: pd.DataFrame | None,
 
 
 def equipment_by_id(equipment: pd.DataFrame | None,
-                    movements: pd.DataFrame | None = None) -> dict:
+                    movements: pd.DataFrame | None = None,
+                    limits: pd.DataFrame | None = None) -> dict:
     """Mapa {equipment_id: atributos} del maestro actual (para resolver via el
     historial de asignaciones: el equipo sigue existiendo aunque el tag se haya
     quitado, solo cambio su `rfid`)."""
     out: dict = {}
     if equipment is None or equipment.empty:
         return out
-    prod = equipment_product_map(movements)
+    prod = equipment_product_map(movements, limits)
     for _, e in equipment.iterrows():
         eid = e.get("equipment_id")
         if _present(eid):
@@ -202,7 +242,8 @@ def installation_report(changes: pd.DataFrame | None,
                         movements: pd.DataFrame | None = None,
                         date_from: pd.Timestamp | None = None,
                         date_to: pd.Timestamp | None = None,
-                        history: pd.DataFrame | None = None) -> pd.DataFrame:
+                        history: pd.DataFrame | None = None,
+                        limits: pd.DataFrame | None = None) -> pd.DataFrame:
     """Construye el reporte de instalacion de tags a partir del log de auditoria.
 
     Una fila por evento de cambio de RFID en el rango [date_from, date_to]
@@ -212,6 +253,10 @@ def installation_report(changes: pd.DataFrame | None,
          (historial tag->equipo que acumula el poller) -> el equipo sigue
          existiendo, solo cambio su tag;
       3. si tampoco, el ID se marca como `config.UNIDENTIFIED` (no se puede saber).
+
+    `limits` (consumption_limits) aporta el producto ASIGNADO al equipo (los
+    'Products consumed' de AdaptIQ): sin el, un equipo recien tagueado y sin
+    despachos quedaba con la columna Product vacia.
     """
     if changes is None or changes.empty:
         return pd.DataFrame(columns=_REPORT_COLS)
@@ -232,8 +277,8 @@ def installation_report(changes: pd.DataFrame | None,
     if df.empty:
         return pd.DataFrame(columns=_REPORT_COLS)
 
-    lut = tag_lookup(equipment, movements)
-    eq_by_id = equipment_by_id(equipment, movements)
+    lut = tag_lookup(equipment, movements, limits)
+    eq_by_id = equipment_by_id(equipment, movements, limits)
     hist = _history_map(history)
     rows = []
     for _, r in df.iterrows():

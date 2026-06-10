@@ -109,6 +109,10 @@ class Database:
         # Cache de columnas fisicas por tabla (PRAGMA table_info), para armar el
         # SELECT explicito de `read()` una sola vez por entidad.
         self._col_cache: dict[str, set[str]] = {}
+        # En una base EN MEMORIA cada conexion nueva es una base vacia distinta:
+        # las lecturas no pueden abrir conexiones efimeras y vuelven a la
+        # conexion compartida bajo el lock (solo la usan las pruebas).
+        self._memory = ":memory:" in str(path)
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         # WAL: permite que un lector (GUI/worker) no bloquee al escritor (poller) y
@@ -258,21 +262,26 @@ class Database:
             pass
         return conn
 
-    def _read_one(self, sql: str, params: tuple = ()) -> tuple | None:
+    def _read_rows(self, sql: str, params: tuple = ()) -> list[tuple]:
+        """Ejecuta un SELECT y devuelve tuplas. Archivo: conexion efimera propia
+        (WAL: no espera al escritor). Memoria: conexion compartida + lock."""
+        if self._memory:
+            with self._lock:
+                return [tuple(r) for r in self._conn.execute(sql, params).fetchall()]
         conn = self._open_read_conn()
         try:
-            return conn.execute(sql, params).fetchone()
+            return conn.execute(sql, params).fetchall()
         finally:
             conn.close()
+
+    def _read_one(self, sql: str, params: tuple = ()) -> tuple | None:
+        rows = self._read_rows(sql, params)
+        return rows[0] if rows else None
 
     def _existing_columns(self, entity: str) -> set[str]:
         cached = self._col_cache.get(entity)
         if cached is None:
-            conn = self._open_read_conn()
-            try:
-                rows = conn.execute(f'PRAGMA table_info("{entity}")').fetchall()
-            finally:
-                conn.close()
+            rows = self._read_rows(f'PRAGMA table_info("{entity}")')
             cached = {r[1] for r in rows}
             self._col_cache[entity] = cached
         return cached
@@ -299,11 +308,7 @@ class Database:
             sql += f" ORDER BY {order_by}"
         if limit:
             sql += f" LIMIT {int(limit)}"
-        conn = self._open_read_conn()
-        try:
-            rows = conn.execute(sql, params).fetchall()
-        finally:
-            conn.close()
+        rows = self._read_rows(sql, params)
         df = self._records_to_df(entity, rows, sel)
         if len(sel) != len(cols):
             # Columnas canonicas aun no presentes en una replica vieja -> NA
