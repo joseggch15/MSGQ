@@ -977,6 +977,18 @@ _TPL: dict[str, tuple[str, str]] = {
     "alert.sfl_conflict": (
         "Despacho sin equipo de {volume:,.0f} L ({product}) supera el SFL máximo de flota {fleet_max:,.0f} L",
         "Equipment-less dispense of {volume:,.0f} L ({product}) exceeds fleet max SFL {fleet_max:,.0f} L"),
+    "alert.idle_asset": (
+        "Equipo In Service sin despachos hace {days:,.0f} días (último: {last})",
+        "In Service equipment with no dispenses for {days:,.0f} days (last: {last})"),
+    "alert.idle_never": (
+        "Equipo In Service que NUNCA ha despachado en el histórico replicado",
+        "In Service equipment that has NEVER dispensed in the replicated history"),
+    "alert.unfueled_activity": (
+        "SMU avanzó {smu:,.0f} {unit}: consumo esperado ~{expected:,.0f} L > SFL {sfl:,.0f} L sin repostar — ~{missing:,.0f} L sin registrar",
+        "SMU advanced {smu:,.0f} {unit}: expected burn ~{expected:,.0f} L > SFL {sfl:,.0f} L with no refuel — ~{missing:,.0f} L unrecorded"),
+    "alert.fueling_idle": (
+        "{n} despachos por {litres:,.0f} L en {days:,.0f} días con SMU congelado en {smu:,.0f}{over}",
+        "{n} dispenses for {litres:,.0f} L across {days:,.0f} days with SMU frozen at {smu:,.0f}{over}"),
     "alert.product_foreign": (
         "Despacho de {product} ({pclass}) a equipo de tipo {expected}: producto ajeno — posible tag clonado o equipo mal configurado",
         "Dispense of {product} ({pclass}) to a {expected}-type equipment: foreign product — possible cloned tag or misconfigured equipment"),

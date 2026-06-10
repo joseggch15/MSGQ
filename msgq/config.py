@@ -99,6 +99,48 @@ SFL_FALLBACK_BY_CATEGORY: tuple[tuple[str, float], ...] = (
 )
 
 # ---------------------------------------------------------------------------
+# Auditoria de actividad (equipos fantasma / coherencia actividad<->combustible)
+# ---------------------------------------------------------------------------
+# Un equipo 'In Service' sin despachos durante N dias distorsiona los KPIs de
+# disponibilidad: el umbral de advertencia y el critico (core/activity_audit.py).
+IDLE_ASSET_DAYS = 15
+IDLE_ASSET_DAYS_CRITICAL = 30
+
+# 'Trabaja sin repostar': entre dos LECTURAS de SMU consecutivas, el consumo
+# esperado (avance de SMU x burn rate tipico del equipo) se compara contra TODO
+# el combustible registrado al equipo en esa ventana (incluidos los despachos
+# sin SMU). Si el faltante (esperado - registrado) supera SFL * factor, el
+# equipo no pudo operar asi con un solo tanque -> recibio combustible NO
+# registrado en el FMS. El factor da margen sobre el tanque lleno. Las ventanas
+# mas largas que el maximo se descartan: alli el burn rate tipico x miles de
+# horas amplifica el error (y las brechas largas de cobertura de SMU del
+# endpoint generarian falsos positivos sistematicos).
+ACTIVITY_UNFUELED_SFL_FACTOR = 1.2
+ACTIVITY_UNFUELED_MAX_GAP_DAYS = 60.0
+
+# 'Repostado sin operar': despachos consecutivos cuyo SMU NO avanza (epsilon
+# tolera ruido de lectura). Se reporta una racha con >= N despachos abarcando
+# >= D dias; si los litros acumulados superan el SFL, el tanque no pudo
+# absorberlos sin operar -> desvio de combustible (severidad critica).
+ACTIVITY_FROZEN_SMU_EPSILON = 0.5
+ACTIVITY_FROZEN_MIN_DISPENSES = 3
+ACTIVITY_FROZEN_MIN_DAYS = 7.0
+
+# Avance fisicamente plausible del SMU por HORA de pared transcurrida entre dos
+# despachos. Filtra lecturas corruptas (saltos de cientos de miles de horas en
+# un dia) ANTES de estimar consumo: un horometro avanza a lo sumo ~1 h por hora
+# (margen por desfase de reloj); un odometro, a lo sumo ~120 km/h sostenidos.
+# Lo que excede esto es un sensor danado (dominio de hardware_health), no
+# actividad real.
+ACTIVITY_MAX_SMU_PER_HOUR_HRS = 1.25
+ACTIVITY_MAX_SMU_PER_HOUR_KM = 120.0
+
+# Categorias de alerta de la auditoria de actividad.
+ALERT_IDLE_ASSET = "Equipo fantasma (In Service sin despachos)"
+ALERT_UNFUELED_ACTIVITY = "Combustible no registrado (trabaja sin repostar)"
+ALERT_FUELING_IDLE = "Despachos sin operación (SMU congelado)"
+
+# ---------------------------------------------------------------------------
 # Auditoria de Burn Rate (consumo de combustible, L/h)
 # ---------------------------------------------------------------------------
 # El burn rate de un equipo es el combustible que quema por unidad de SMU

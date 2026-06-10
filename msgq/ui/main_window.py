@@ -145,6 +145,7 @@ class _ViewsWorker(QThread):
                 sfl_alerts,
                 sfl_conflicts,
                 h["burn"], h["hw"], h["product"], h["vd"], h["th"],
+                h["activity"],
             )
             self.done.emit({
                 "disp": _project_for_kind(disp, "DISPENSE"),
@@ -228,6 +229,7 @@ class MainWindow(QMainWindow):
         self._hw_window = None
         self._vd_window = None
         self._th_window = None
+        self._act_window = None
         # Alarma de escritorio para despachos sobre Safe Fill Level (SFL) y para
         # equipos con burn rate anómalo.
         self._tray = self._make_tray()
@@ -260,6 +262,10 @@ class MainWindow(QMainWindow):
         self._th_count: int | None = None
         self._seen_th_ids: set[str] = set()
         self._th_initialized = False
+        # Cache de alertas de actividad (equipos fantasma / coherencia
+        # SMU<->combustible): recorre todo el historico, va con las pesadas.
+        self._activity_alerts = al._empty_alerts()
+        self._activity_count: int | None = None
         # Worker en segundo plano para las alertas pesadas (no congelar la GUI). El
         # calculo real corre en un PROCESO aparte (pool perezoso); el GIL hacia que
         # un simple hilo congelara la UI igual. `_last_heavy_done` marca cuando
@@ -329,7 +335,7 @@ class MainWindow(QMainWindow):
         self._refresh_views(force=True)
         for child in (self._eq_window, self._tank_window, self._inv_window,
                       self._sfl_window, self._burn_window, self._hw_window,
-                      self._vd_window, self._th_window):
+                      self._vd_window, self._th_window, self._act_window):
             if child is not None and child.isVisible():
                 child.rebuild_ui()
 
@@ -454,6 +460,13 @@ class MainWindow(QMainWindow):
             tooltip=t("Audita el mismo tag despachando en dos lugares en un lapso imposible "
                       "(tag removido para robar combustible), en vivo desde el endpoint."))
         fl.addWidget(self.btn_th)
+        self.btn_act = make_button(
+            t("Equipos fantasma…"), self._on_open_activity, object_name="danger",
+            tooltip=t("Audita la actividad: equipos In Service sin despachar (fantasmas), "
+                      "equipos que trabajan más de lo que su tanque permite sin repostar "
+                      "(combustible no registrado) y despachos frecuentes con SMU congelado "
+                      "(repostado sin operar)."))
+        fl.addWidget(self.btn_act)
         return bar
 
     def _on_open_equipment(self):
@@ -559,6 +572,19 @@ class MainWindow(QMainWindow):
             return
         self._th_window = TagHoppingWindow(self._db, self)
         self._th_window.show()
+
+    def _on_open_activity(self):
+        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
+        try:
+            from msgq.ui.activity_window import ActivityWindow
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self, t("Falta pyqtgraph"),
+                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
+                f"{t('Instala la dependencia: pip install pyqtgraph')}")
+            return
+        self._act_window = ActivityWindow(self._db, self)
+        self._act_window.show()
 
     def _effective_db_path(self) -> str:
         """Ruta del replica segun el modo: demo en archivo aparte, real en el suyo."""
@@ -813,6 +839,7 @@ class MainWindow(QMainWindow):
             or mv_count != self._product_count
             or mv_count != self._vd_count
             or mv_count != self._th_count
+            or mv_count != self._activity_count
         )
         if need_heavy:
             self._maybe_spawn_alerts_worker()
@@ -824,7 +851,7 @@ class MainWindow(QMainWindow):
             return
         heavy = {"burn": self._burn_alerts, "hw": self._hw_alerts,
                  "product": self._product_alerts, "vd": self._vd_alerts,
-                 "th": self._th_alerts}
+                 "th": self._th_alerts, "activity": self._activity_alerts}
         worker = _ViewsWorker(self._db.path, heavy, self)
         worker.done.connect(self._on_views_ready)
         worker.failed.connect(self._on_views_failed)
@@ -907,12 +934,14 @@ class MainWindow(QMainWindow):
         self._product_alerts = result.get("product", self._product_alerts)
         self._vd_alerts = result.get("vd", self._vd_alerts)
         self._th_alerts = result.get("th", self._th_alerts)
+        self._activity_alerts = result.get("activity", self._activity_alerts)
         mv_count, chg_count = result.get("counts", (None, None))
         self._burn_count = mv_count
         self._hw_key = (mv_count, chg_count)
         self._product_count = mv_count
         self._vd_count = mv_count
         self._th_count = mv_count
+        self._activity_count = mv_count
         # Rearma el panel con la cache recien actualizada: el worker de vistas
         # relee las alertas livianas (24h) en segundo plano y las combina.
         self._refresh_views(force=True)

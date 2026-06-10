@@ -567,12 +567,16 @@ def test_e2e_export_sheets():
 
 def test_e2e_fetch_changes_paged():
     src = make_source(_settings(":memory:"))
+    # Directa PRIMERO y paginada despues: cada llamada a fetch_changes puede
+    # anexar UN evento vivo nuevo (simulador), asi que exigir igualdad exacta
+    # era flaky. El log solo crece: la paginada debe traer todo lo que trajo la
+    # directa, mas a lo sumo el evento vivo que su propia llamada genere.
+    direct = _run(src.fetch_changes("EquipmentRfid", None))
     collected: list = []
     _run(src.fetch_changes_paged("EquipmentRfid", None, collected.extend))
-    direct = _run(src.fetch_changes("EquipmentRfid", None))
     _run(src.aclose())
     assert len(collected) > 0
-    assert len(collected) == len(direct)   # mismas filas que la version completa
+    assert len(direct) <= len(collected) <= len(direct) + 1
     print("OK  test_e2e_fetch_changes_paged")
 
 

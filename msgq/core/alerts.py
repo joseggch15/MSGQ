@@ -21,8 +21,8 @@ import pandas as pd
 
 from msgq import config
 from msgq.core import (
-    burn_rate, hardware_health, product_audit, sfl_audit, tag_hopping,
-    volume_deviation,
+    activity_audit, burn_rate, hardware_health, product_audit, sfl_audit,
+    tag_hopping, volume_deviation,
 )
 from msgq.i18n import tr_fmt
 
@@ -435,6 +435,86 @@ def detect_hardware_alerts(mv: pd.DataFrame, equipment: pd.DataFrame | None = No
                              recent=float(r.get("caudal_reciente") or 0.0)),
             "source_id": r.get("meter_id"),
         })
+    if not rows:
+        return _empty_alerts()
+    return pd.DataFrame(rows, columns=ALERT_COLS).reset_index(drop=True)
+
+
+# ===========================================================================
+# Detector de actividad (fantasmas / coherencia actividad<->combustible)
+# ===========================================================================
+
+def detect_activity_alerts(mv: pd.DataFrame, equipment: pd.DataFrame | None = None,
+                           limits: pd.DataFrame | None = None,
+                           now: pd.Timestamp | None = None) -> pd.DataFrame:
+    """Alertas de la auditoría de actividad (`core/activity_audit`):
+
+      • Equipo fantasma (ADVERTENCIA): 'In Service' sin despachos >= umbral
+        crítico (o que nunca despachó) — distorsiona los KPIs de disponibilidad.
+      • Trabaja sin repostar (CRÍTICO): consumo esperado por avance de SMU
+        supera el SFL sin despacho de por medio -> combustible no registrado.
+      • Repostado sin operar: racha de despachos con SMU congelado; CRÍTICO si
+        los litros acumulados exceden el SFL, ADVERTENCIA en caso contrario.
+    """
+    rows: list[dict] = []
+
+    idle = activity_audit.idle_assets(
+        equipment, mv, now=now, min_days=config.IDLE_ASSET_DAYS_CRITICAL)
+    for _, r in idle.iterrows():
+        never = r.get("clase") == activity_audit.CLASS_NEVER
+        last = r.get("ultimo_despacho")
+        detail = (tr_fmt("alert.idle_never") if never else
+                  tr_fmt("alert.idle_asset",
+                         days=float(r.get("dias_sin_despachar") or 0.0),
+                         last="" if pd.isna(last) else f"{last:%d/%m/%Y}"))
+        rows.append({
+            "timestamp": None if pd.isna(last) else last,
+            "severity": SEV_WARNING, "category": config.ALERT_IDLE_ASSET,
+            "equipment_id": r.get("equipment_id"),
+            "equipment_description": r.get("description"),
+            "type": "IDLE", "volume": None, "detail": detail,
+            "source_id": f"idle:{r.get('equipment_id')}",
+        })
+
+    unfueled = activity_audit.unfueled_activity(mv, equipment, limits)
+    for _, r in unfueled.iterrows():
+        rows.append({
+            "timestamp": r.get("hasta"), "severity": SEV_CRITICAL,
+            "category": config.ALERT_UNFUELED_ACTIVITY,
+            "equipment_id": r.get("equipment_id"),
+            "equipment_description": r.get("equipment_description"),
+            "type": "SMU", "volume": r.get("no_registrado"),
+            "detail": tr_fmt("alert.unfueled_activity",
+                             smu=float(r.get("smu_delta") or 0.0),
+                             unit=r.get("smu_type") or "SMU",
+                             expected=float(r.get("consumo_esperado") or 0.0),
+                             sfl=float(r.get("sfl") or 0.0),
+                             missing=float(r.get("no_registrado") or 0.0)),
+            "source_id": r.get("source_id"),
+        })
+
+    frozen = activity_audit.fueling_without_activity(mv, equipment, limits)
+    for _, r in frozen.iterrows():
+        over = bool(r.get("sobre_sfl"))
+        sfl = r.get("sfl")
+        over_txt = ("" if not over or sfl is None or pd.isna(sfl)
+                    else f" — > SFL {float(sfl):,.0f} L")
+        rows.append({
+            "timestamp": r.get("hasta"),
+            "severity": SEV_CRITICAL if over else SEV_WARNING,
+            "category": config.ALERT_FUELING_IDLE,
+            "equipment_id": r.get("equipment_id"),
+            "equipment_description": r.get("equipment_description"),
+            "type": "SMU", "volume": r.get("litros"),
+            "detail": tr_fmt("alert.fueling_idle",
+                             n=int(r.get("despachos") or 0),
+                             litres=float(r.get("litros") or 0.0),
+                             days=float(r.get("dias") or 0.0),
+                             smu=float(r.get("smu_estancado") or 0.0),
+                             over=over_txt),
+            "source_id": f"frozen:{r.get('equipment_id')}:{r.get('desde')}",
+        })
+
     if not rows:
         return _empty_alerts()
     return pd.DataFrame(rows, columns=ALERT_COLS).reset_index(drop=True)

@@ -49,5 +49,6 @@ def compute_heavy_alerts(db_path: str) -> dict:
         "product": _safe(al.detect_product_mismatch_alerts, mv, limits, prod_hist),
         "vd":      _safe(al.detect_volume_deviation_alerts, mv),
         "th":      _safe(al.detect_tag_hopping_alerts, mv, eq),
+        "activity": _safe(al.detect_activity_alerts, mv, eq, limits),
         "counts":  (len(mv), len(changes)),
     }
