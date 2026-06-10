@@ -86,6 +86,18 @@ SFL_TOLERANCE_PCT = 0.02
 # producto: combustible despachado sin trazabilidad y por encima de lo seguro.
 ALERT_SFL_CONFLICT = "Despacho sin equipo / no autorizado"
 
+# SFL de RESPALDO por categoria para el reporte 'Dispensas por Equipo'
+# (core/dispense_report.py). La fuente primaria del SFL es SIEMPRE el limite
+# real por equipo/producto que el poller replica de la API (consumption_limits);
+# este mapeo TEMPORAL solo cubre los equipos sin limite cargado en el FMS.
+# Se cruza por PALABRA CLAVE contra la categoria del equipo (sin distinguir
+# mayusculas); gana la primera coincidencia. Litros, ajustables por el auditor.
+SFL_FALLBACK_BY_CATEGORY: tuple[tuple[str, float], ...] = (
+    ("LIGHT VEHICLE", 80.0),
+    ("LIGHT TRUCK", 150.0),
+    ("EXCAVATOR", 7450.0),
+)
+
 # ---------------------------------------------------------------------------
 # Auditoria de Burn Rate (consumo de combustible, L/h)
 # ---------------------------------------------------------------------------

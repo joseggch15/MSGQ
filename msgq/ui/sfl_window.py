@@ -240,6 +240,13 @@ class SFLWindow(QMainWindow):
         btn_refresh.clicked.connect(lambda: self._refresh(manual=True))
         btn_export = QPushButton(t("Exportar a Excel…"))
         btn_export.clicked.connect(self._on_export)
+        btn_report = QPushButton(t("Reporte por equipo…"))
+        btn_report.setObjectName("accent")
+        btn_report.setToolTip(t(
+            "Genera el reporte 'Dispensas por Equipo' (PDF con una gráfica por "
+            "equipo contra su SFL + Excel analítico), para todos los equipos, "
+            "equipos específicos o por categoría/grupo/departamento."))
+        btn_report.clicked.connect(self._on_open_report)
 
         row.addWidget(QLabel(t("Rango:")))
         row.addWidget(self.cmb_range)
@@ -253,9 +260,23 @@ class SFLWindow(QMainWindow):
         row.addWidget(self.txt_search, stretch=1)
         row.addWidget(btn_refresh)
         row.addWidget(btn_export)
+        row.addWidget(btn_report)
         row.addWidget(language_selector(self._on_language_changed))
         row.addWidget(theme_selector(self._on_theme_changed))
         return box
+
+    def _on_open_report(self):
+        """Abre el diálogo del reporte 'Dispensas por Equipo' (PDF/Excel).
+        Import perezoso: matplotlib solo se carga si se usa el reporte."""
+        try:
+            from msgq.ui.dispense_report_dialog import DispenseReportDialog
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self, t("Falta matplotlib"),
+                f"{t('No se pudo abrir el generador de reportes:')}\n{exc}\n\n"
+                f"{t('Instala la dependencia: pip install matplotlib')}")
+            return
+        DispenseReportDialog(self._db, self).exec()
 
     def _build_kpis(self) -> QFrame:
         frame = QFrame()
