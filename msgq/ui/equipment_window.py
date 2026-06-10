@@ -37,7 +37,8 @@ from msgq.storage import Database
 from msgq.ui import theme
 from msgq.ui.charts import BarChart, TimeSeriesChart
 from msgq.ui.common import (
-    kpi_label, language_selector, make_table, theme_selector, warn_label, wrap_with_search,
+    BusyOverlay, kpi_label, language_selector, make_table, theme_selector,
+    warn_label, wrap_with_search,
 )
 
 _INVENTORY_COLS = [
@@ -68,6 +69,55 @@ class AuditLogDialog(QDialog):
                else t("Sin cambios de este equipo en la réplica todavía "
                       "(el log se llena al sincronizar)."))
         lay.addWidget(QLabel(msg))
+
+
+class _LoadWorker(QThread):
+    """Lee la réplica y calcula la analítica temporal (cara) en un hilo aparte.
+
+    Antes `_refresh` leía el log de auditoría completo y recorría las decenas de
+    miles de eventos EN EL HILO DE LA GUI en cada auto-refresco, congelando la
+    ventana. Aquí se lee y se calcula todo; la GUI solo proyecta resultados."""
+
+    done = Signal(object)   # dict con los DataFrames/series ya calculados
+    failed = Signal(str)
+
+    def __init__(self, db: Database, parent=None):
+        super().__init__(parent)
+        self._db = db
+
+    def run(self) -> None:  # noqa: D401 - QThread entrypoint
+        try:
+            rdb = Database(self._db.path, create=False)
+            try:
+                eq_all = rdb.get_equipment()
+                changes = rdb.get_change_events()
+            finally:
+                rdb.close()
+            trans = ea.status_transitions(changes, eq_all)
+            out = {
+                "eq_all": eq_all,
+                "changes": changes,
+                "trans": trans,
+                "rfid_sum": ea.rfid_change_summary(changes),
+                "rfid_time": ea.rfid_changes_over_time(changes),
+                "rfid_churn": ea.rfid_churn_by_tag(changes),
+                "trans_sum": ea.status_transition_summary(trans),
+                "top_oi": ea.top_equipment_by_transition(trans, OUT, IN),
+                "top_io": ea.top_equipment_by_transition(trans, IN, OUT),
+                "by_grp": ea.transitions_by_dimension(trans, "group", "Grupo"),
+                "by_cc": ea.transitions_by_dimension(trans, "cost_centre", "Cost Centre"),
+                "tis": ea.time_in_service(trans),
+                "cc_eq": ea.top_equipment_by_attribute(
+                    changes, config.ATTR_COST_CENTRE, eq_all, label="Cambios CC"),
+                "cc_by": ea.attribute_change_by_dimension(
+                    changes, config.ATTR_COST_CENTRE, eq_all, "cost_centre", "Cost Centre"),
+                "attr": ea.attribute_change_summary(changes),
+                "audit": ea.audit_by_user(changes),
+                "comp": ea.data_completeness(eq_all),
+            }
+            self.done.emit(out)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"{exc}\n\n{traceback.format_exc()}")
 
 
 class _DataQualityWorker(QThread):
@@ -105,6 +155,9 @@ class EquipmentWindow(QMainWindow):
         self._dq = None
         self._dq_worker: _DataQualityWorker | None = None
         self._dq_eq_count = None
+        self._worker: _LoadWorker | None = None
+        self._pending_refresh = False
+        self._busy: BusyOverlay | None = None
         self.setWindowTitle(t("MSGQ — Análisis de Equipos  ·  Newmont Merian"))
         self.resize(1420, 880)
 
@@ -119,6 +172,8 @@ class EquipmentWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802 - override Qt
         self._timer.stop()
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.wait(3000)
         if self._dq_worker is not None and self._dq_worker.isRunning():
             self._dq_worker.wait(3000)
         event.accept()
@@ -164,6 +219,8 @@ class EquipmentWindow(QMainWindow):
         lay.addWidget(self._build_kpis())
         lay.addWidget(self._build_tabs(), stretch=1)
         self.setCentralWidget(root)
+        # Indicador de carga (cubre el área central durante la lectura/recalculo).
+        self._busy = BusyOverlay(root, t("Cargando datos…"))
 
     def _build_controls(self) -> QGroupBox:
         box = QGroupBox(t("Filtros"))
@@ -368,46 +425,62 @@ class EquipmentWindow(QMainWindow):
     # --- Refresco -----------------------------------------------------------
 
     def _refresh(self):
-        """Refresco COMPLETO: relee la replica, recalcula la analitica temporal
-        (cara) y la cachea, dibuja graficas y aplica los filtros del snapshot."""
-        try:
-            self._eq_all = self._db.get_equipment()
-            self._changes = self._db.get_change_events()
-            self._last_counts = (len(self._eq_all), len(self._changes))
-            ch, eq_all = self._changes, self._eq_all
+        """Refresco COMPLETO en segundo plano: el worker relee la replica y
+        recalcula la analitica temporal (cara); `_on_loaded` solo proyecta. Antes
+        todo esto corria en el hilo de la GUI y la ventana se congelaba en cada
+        auto-refresco del historial."""
+        if self._worker is not None and self._worker.isRunning():
+            self._pending_refresh = True   # se relanza al terminar el actual
+            return
+        if self._eq_all.empty and self._busy is not None:
+            self._busy.start(t("Cargando datos…"))
+        self._worker = _LoadWorker(self._db, self)
+        self._worker.done.connect(self._on_loaded)
+        self._worker.failed.connect(self._on_load_failed)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.start()
 
-            # Analitica temporal (cara): se cachea para que filtrar no la repita.
-            self._rfid_sum = ea.rfid_change_summary(ch)
-            self._trans = ea.status_transitions(ch, eq_all)
-            trans = self._trans
+    def _on_load_failed(self, message: str):
+        self._worker = None
+        if self._busy is not None:
+            self._busy.stop()
+        QMessageBox.critical(self, t("Error al analizar"), message)
+
+    def _on_loaded(self, data: dict):
+        self._worker = None
+        self._eq_all = data["eq_all"]
+        self._changes = data["changes"]
+        self._rfid_sum = data["rfid_sum"]
+        self._trans = data["trans"]
+        self._last_counts = (len(self._eq_all), len(self._changes))
+        try:
+            ch, eq_all, trans = self._changes, self._eq_all, self._trans
 
             rs = self._rfid_sum
-            self.m_rfid_time.set_dataframe(ea.rfid_changes_over_time(ch))
-            self.m_rfid_churn.set_dataframe(ea.rfid_churn_by_tag(ch))
+            self.m_rfid_time.set_dataframe(data["rfid_time"])
+            self.m_rfid_churn.set_dataframe(data["rfid_churn"])
             self.lbl_rfid.setText(
                 f"{t('Eventos RFID')}: {rs['Eventos RFID']:,}   ·   {t('Asignados')}: {rs['Asignados']:,}"
                 f"   ·   {t('Cambiados')}: {rs['Cambiados']:,}   ·   {t('Removidos')}: {rs['Removidos']:,}"
                 f"   ·   {t('Tags')}: {rs['Tags (registros)']:,}")
 
             self.m_trans.set_dataframe(trans)
-            self.m_trans_sum.set_dataframe(ea.status_transition_summary(trans))
-            self.m_top_oi.set_dataframe(ea.top_equipment_by_transition(trans, OUT, IN))
-            self.m_top_io.set_dataframe(ea.top_equipment_by_transition(trans, IN, OUT))
-            self.m_by_grp.set_dataframe(ea.transitions_by_dimension(trans, "group", "Grupo"))
-            self.m_by_cc.set_dataframe(ea.transitions_by_dimension(trans, "cost_centre", "Cost Centre"))
-            self.m_tis.set_dataframe(ea.time_in_service(trans))
+            self.m_trans_sum.set_dataframe(data["trans_sum"])
+            self.m_top_oi.set_dataframe(data["top_oi"])
+            self.m_top_io.set_dataframe(data["top_io"])
+            self.m_by_grp.set_dataframe(data["by_grp"])
+            self.m_by_cc.set_dataframe(data["by_cc"])
+            self.m_tis.set_dataframe(data["tis"])
 
-            self.m_cc_eq.set_dataframe(ea.top_equipment_by_attribute(
-                ch, config.ATTR_COST_CENTRE, eq_all, label="Cambios CC"))
-            self.m_cc_by.set_dataframe(ea.attribute_change_by_dimension(
-                ch, config.ATTR_COST_CENTRE, eq_all, "cost_centre", "Cost Centre"))
+            self.m_cc_eq.set_dataframe(data["cc_eq"])
+            self.m_cc_by.set_dataframe(data["cc_by"])
 
-            self.m_attr.set_dataframe(ea.attribute_change_summary(ch))
-            self.m_audit.set_dataframe(ea.audit_by_user(ch))
+            self.m_attr.set_dataframe(data["attr"])
+            self.m_audit.set_dataframe(data["audit"])
 
-            # Calidad de datos: completitud es barata (en línea); las variantes y el
-            # fuzzy O(n²) van en segundo plano y sólo si el maestro cambió.
-            self.m_comp.set_dataframe(ea.data_completeness(eq_all))
+            # Calidad de datos: completitud ya viene calculada; las variantes y el
+            # fuzzy O(n²) van en su propio worker y sólo si el maestro cambió.
+            self.m_comp.set_dataframe(data["comp"])
             self._maybe_run_data_quality(eq_all)
 
             self._update_charts(eq_all, ch, trans)
@@ -416,6 +489,12 @@ class EquipmentWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, t("Error al analizar"),
                                  f"{exc}\n\n{traceback.format_exc()}")
+        finally:
+            if self._busy is not None:
+                self._busy.stop()
+        if self._pending_refresh:          # llegaron datos nuevos mientras cargaba
+            self._pending_refresh = False
+            self._refresh()
 
     def _apply_filters(self):
         """Solo lo que depende de los filtros (rapido): inventario, agrupaciones

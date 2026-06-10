@@ -21,7 +21,7 @@ import traceback
 from datetime import datetime
 
 import pandas as pd
-from PySide6.QtCore import QDate, Qt, QSettings, QTimer
+from PySide6.QtCore import QDate, Qt, QSettings, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDateEdit, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
@@ -37,9 +37,56 @@ from msgq.storage import Database
 from msgq.ui import theme
 from msgq.ui.charts import BarChart, TimeSeriesChart
 from msgq.ui.common import (
-    kpi_label, language_selector, make_table, theme_selector, warn_label, wrap_with_search,
+    BusyOverlay, kpi_label, language_selector, make_table, theme_selector,
+    warn_label, wrap_with_search,
 )
 from msgq.ui.equipment_window import AuditLogDialog
+
+
+class _LoadWorker(QThread):
+    """Lee la réplica y construye el reporte de instalación EN OTRO HILO.
+
+    Antes la ventana releía TODO el historial de movimientos (cientos de miles de
+    filas) en el hilo de la GUI; además el auto-refresco comparaba `len()` de los
+    cambios RFID contra `row_count()` de TODOS los change_events (nunca iguales),
+    así que esa relectura completa se disparaba cada 10 s: la ventana vivía
+    congelada. Ahora la carga corre aquí y los conteos que se emiten provienen de
+    las MISMAS tablas que compara `_maybe_refresh` (gating correcto)."""
+
+    done = Signal(object)   # dict con eq, changes, movements, history, report, counts
+    failed = Signal(str)
+
+    # `movements` solo se usa para inferir el producto por equipo
+    # (`ri.equipment_product_map`): con 3 columnas de 46 alcanza.
+    _MOVEMENT_COLS = ["equipment_id", "product", "kind"]
+
+    def __init__(self, db: Database, date_from: pd.Timestamp,
+                 date_to: pd.Timestamp, parent=None):
+        super().__init__(parent)
+        self._db = db
+        self._from = date_from
+        self._to = date_to
+
+    def run(self) -> None:  # noqa: D401 - QThread entrypoint
+        try:
+            rdb = Database(self._db.path, create=False)
+            try:
+                eq = rdb.get_equipment()
+                changes = rdb.get_change_events(config.CHANGE_RECORD_RFID)
+                movements = rdb.read("movements", columns=self._MOVEMENT_COLS)
+                history = rdb.get_rfid_history()
+                counts = (rdb.row_count("equipment"),
+                          rdb.row_count("change_events"),
+                          rdb.row_count("movements"),
+                          rdb.row_count("rfid_history"))
+            finally:
+                rdb.close()
+            report = ri.installation_report(
+                changes, eq, movements, self._from, self._to, history)
+            self.done.emit({"eq": eq, "changes": changes, "movements": movements,
+                            "history": history, "report": report, "counts": counts})
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"{exc}\n\n{traceback.format_exc()}")
 
 # Rangos rapidos (etiqueta -> dias hacia atras; None = todo el historico).
 _RANGES = (
@@ -68,6 +115,9 @@ class InventoryWindow(QMainWindow):
         self._report = pd.DataFrame()
         self._last_counts = None
         self._loading_range = False
+        self._worker: _LoadWorker | None = None
+        self._pending_refresh = False
+        self._busy: BusyOverlay | None = None
         self.setWindowTitle(t("MSGQ — Inventario de Tags RFID  ·  Newmont Merian"))
         self.resize(1420, 880)
 
@@ -81,6 +131,8 @@ class InventoryWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802 - override Qt
         self._timer.stop()
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.wait(3000)
         event.accept()
 
     # --- Idioma / tema (la ventana principal es la fuente unica) ------------
@@ -132,6 +184,8 @@ class InventoryWindow(QMainWindow):
         lay.addWidget(self._build_kpis())
         lay.addWidget(self._build_tabs(), stretch=1)
         self.setCentralWidget(root)
+        # Indicador de carga (cubre el área central durante la lectura/recalculo).
+        self._busy = BusyOverlay(root, t("Cargando datos…"))
 
     def _build_controls(self) -> QGroupBox:
         box = QGroupBox(t("Reporte de instalación de tags RFID (fecha real del cambio)"))
@@ -258,20 +312,46 @@ class InventoryWindow(QMainWindow):
     # --- Refresco -----------------------------------------------------------
 
     def _refresh(self):
-        """Relee la replica, recalcula el reporte para el rango y refresca todo."""
-        try:
-            self._eq_all = self._db.get_equipment()
-            self._changes = self._db.get_change_events(config.CHANGE_RECORD_RFID)
-            self._movements = self._db.read("movements")
-            self._history = self._db.get_rfid_history()
-            self._last_counts = (len(self._eq_all), len(self._changes),
-                                 len(self._movements), len(self._history))
+        """Relee la replica y recalcula el reporte EN SEGUNDO PLANO; al terminar,
+        `_on_loaded` proyecta. La GUI nunca lee el historial completo en su hilo."""
+        if self._worker is not None and self._worker.isRunning():
+            self._pending_refresh = True   # se relanza al terminar el actual
+            return
+        if self._report.empty and self._busy is not None:
+            self._busy.start(t("Cargando datos…"))
+        self._worker = _LoadWorker(self._db, self._ts(self.date_from.date()),
+                                   self._ts(self.date_to.date()), self)
+        self._worker.done.connect(self._on_loaded)
+        self._worker.failed.connect(self._on_load_failed)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.start()
 
-            date_from = self._ts(self.date_from.date())
-            date_to = self._ts(self.date_to.date())
-            self._report = ri.installation_report(
-                self._changes, self._eq_all, self._movements, date_from, date_to,
-                self._history)
+    def _on_load_failed(self, message: str):
+        self._worker = None
+        if self._busy is not None:
+            self._busy.stop()
+        QMessageBox.critical(self, t("Error al analizar"), message)
+
+    def _on_loaded(self, data: dict):
+        self._worker = None
+        self._eq_all = data["eq"]
+        self._changes = data["changes"]
+        self._movements = data["movements"]
+        self._history = data["history"]
+        self._report = data["report"]
+        self._last_counts = data["counts"]
+        try:
+            self._project()
+        finally:
+            if self._busy is not None:
+                self._busy.stop()
+        if self._pending_refresh:          # llegaron datos nuevos mientras cargaba
+            self._pending_refresh = False
+            self._refresh()
+
+    def _project(self):
+        """Proyecta el reporte ya calculado en tablas, KPIs y gráficas."""
+        try:
             report = self._report
 
             self.m_report.set_dataframe(ri.report_display(report))
@@ -294,7 +374,8 @@ class InventoryWindow(QMainWindow):
                                  f"{exc}\n\n{traceback.format_exc()}")
 
     def _maybe_refresh(self):
-        """Auto-refresco solo si la replica cambio (mantiene la UI fluida)."""
+        """Auto-refresco solo si la replica cambio (mantiene la UI fluida). Los
+        conteos comparados provienen de las mismas tablas que captura el worker."""
         try:
             counts = (self._db.row_count("equipment"),
                       self._db.row_count("change_events"),

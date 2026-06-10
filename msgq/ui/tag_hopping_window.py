@@ -52,6 +52,14 @@ class _LoadWorker(QThread):
     done = Signal(object, object, object, object, object)  # mv, eq, result, lo, hi
     failed = Signal(str)
 
+    # Columnas de `movements` que esta auditoría consume: leer 11 de 46 reduce
+    # varias veces la conversión SQLite -> DataFrame (menos GIL retenido).
+    _MOVEMENT_COLS = [
+        "id", "kind", "record_collected_at", "updated_at", "flow_duration_s",
+        "meter_id", "gps_coordinates", "product", "tank", "equipment_id",
+        "equipment_description",
+    ]
+
     def __init__(self, db: Database, movements, equipment, lo, hi, parent=None):
         super().__init__(parent)
         self._db = db
@@ -64,7 +72,7 @@ class _LoadWorker(QThread):
         try:
             mv, eq = self._movements, self._equipment
             if mv is None:
-                mv = self._db.read("movements")
+                mv = self._db.read("movements", columns=self._MOVEMENT_COLS)
                 eq = self._db.get_equipment()
             win = mv
             if mv is not None and not mv.empty:

@@ -53,6 +53,15 @@ class _LoadWorker(QThread):
     done = Signal(object, object, object, object, object, object)  # mv, eq, chg, result, lo, hi
     failed = Signal(str)
 
+    # Columnas de `movements` que la auditoría de hardware consume: leer 16 de 46
+    # reduce varias veces la conversión SQLite -> DataFrame (menos GIL retenido).
+    _MOVEMENT_COLS = [
+        "id", "kind", "status", "record_collected_at", "updated_at",
+        "peak_flow_rate", "average_flow_rate", "meter_id", "meter_description",
+        "smu_value", "smu_type", "raw_smu_value", "calculated_smu_value",
+        "equipment_id", "equipment_description", "equipment_status",
+    ]
+
     def __init__(self, db: Database, movements, equipment, changes, lo, hi, parent=None):
         super().__init__(parent)
         self._db = db
@@ -66,7 +75,7 @@ class _LoadWorker(QThread):
         try:
             mv, eq, chg = self._movements, self._equipment, self._changes
             if mv is None:
-                mv = self._db.read("movements")
+                mv = self._db.read("movements", columns=self._MOVEMENT_COLS)
                 eq = self._db.get_equipment()
                 chg = self._db.get_change_events()
             win_mv = self._window(mv, "record_collected_at", "updated_at")

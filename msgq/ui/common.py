@@ -1,10 +1,11 @@
 """Utilidades compartidas de la interfaz grafica (mismo patron del ecosistema)."""
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, QSortFilterProxyModel
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QSortFilterProxyModel
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
-    QPushButton, QTableView, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QProgressBar,
+    QPushButton, QSizePolicy, QTableView, QVBoxLayout, QWidget,
 )
 
 import pandas as pd
@@ -12,6 +13,132 @@ import pandas as pd
 from msgq.i18n import LANGUAGES, current_language, t, tr_fmt
 from msgq.ui import theme
 from msgq.ui.table_model import SORT_ROLE, DataFrameModel
+
+
+# Holgura horizontal (px) que se suma al ancho del TEXTO para calcular el ancho
+# minimo de un boton: cubre el padding del QSS (14px por lado) + la negrita + un
+# margen de seguridad, de modo que el texto NUNCA se trunca. Alto minimo comodo.
+_BUTTON_HPAD = 44
+_BUTTON_MIN_H = 34
+
+
+class FlowLayout(QLayout):
+    """Layout que acomoda los widgets en fila y los ENVUELVE a la siguiente linea
+    cuando no caben en el ancho disponible (como las palabras en un parrafo).
+
+    Es la solucion idiomatica para barras con muchos botones: cada boton conserva su
+    tamano completo (no se trunca) y, al achicar la ventana, los que no caben bajan de
+    fila — UI fluida sin posiciones absolutas en el codigo de las vistas. Adaptado del
+    ejemplo oficial de Qt (Flow Layout) a PySide6."""
+
+    def __init__(self, parent=None, h_spacing=8, v_spacing=8):
+        super().__init__(parent)
+        self._items: list = []
+        self._h_space = h_spacing
+        self._v_space = v_spacing
+
+    def __del__(self):
+        while self.count():
+            self.takeAt(0)
+
+    # -- API requerida por QLayout -----------------------------------------
+    def addItem(self, item):                       # noqa: N802 - override Qt
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):                       # noqa: N802 - override Qt
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):                       # noqa: N802 - override Qt
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):                 # noqa: N802 - override Qt
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):                   # noqa: N802 - override Qt
+        return True
+
+    def heightForWidth(self, width):               # noqa: N802 - override Qt
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):                   # noqa: N802 - override Qt
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):                            # noqa: N802 - override Qt
+        return self.minimumSize()
+
+    def minimumSize(self):                         # noqa: N802 - override Qt
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    # -- nucleo: coloca los items envolviendo por ancho --------------------
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        eff = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, line_h = eff.x(), eff.y(), 0
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._h_space
+            if next_x - self._h_space > eff.right() and line_h > 0:
+                x = eff.x()
+                y = y + line_h + self._v_space
+                next_x = x + hint.width() + self._h_space
+                line_h = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y() + m.bottom()
+
+
+def make_button(text: str, on_click=None, *, object_name: str | None = None,
+                tooltip: str | None = None, min_width: int = 0,
+                expanding: bool = False) -> QPushButton:
+    """Crea un boton que SIEMPRE alberga su texto completo.
+
+    Calcula el ancho minimo con `QFontMetrics` (ancho real del texto en la fuente del
+    boton + el padding del QSS), fija una `QSizePolicy` sensata y un cursor de mano.
+    `expanding=True` lo deja crecer para repartir el espacio sobrante en barras a ancho
+    completo; por defecto toma su tamano preferido (ideal dentro de un `FlowLayout`)."""
+    btn = QPushButton(text)
+    if object_name:
+        btn.setObjectName(object_name)
+    if tooltip:
+        btn.setToolTip(tooltip)
+    if on_click is not None:
+        btn.clicked.connect(on_click)
+    btn.setCursor(Qt.PointingHandCursor)
+    text_w = QFontMetrics(btn.font()).horizontalAdvance(text)
+    btn.setMinimumWidth(max(text_w + _BUTTON_HPAD, min_width))
+    btn.setMinimumHeight(_BUTTON_MIN_H)
+    btn.setSizePolicy(QSizePolicy.Expanding if expanding else QSizePolicy.Preferred,
+                      QSizePolicy.Fixed)
+    return btn
+
+
+def flow_bar(widgets=(), *, margins=(0, 0, 0, 0),
+             h_spacing: int = 8, v_spacing: int = 6) -> QWidget:
+    """Contenedor cuyo `FlowLayout` acomoda sus widgets en fila y los baja de linea al
+    achicar la ventana. Devuelve el QWidget listo; agrega mas con
+    `bar.layout().addWidget(...)`. Habilita `heightForWidth` para que el layout padre
+    le reserve el alto correcto cuando los elementos envuelven a varias filas."""
+    w = QWidget()
+    lay = FlowLayout(w, h_spacing=h_spacing, v_spacing=v_spacing)
+    lay.setContentsMargins(*margins)
+    for x in widgets:
+        lay.addWidget(x)
+    sp = w.sizePolicy()
+    sp.setHeightForWidth(True)
+    sp.setVerticalPolicy(QSizePolicy.Minimum)
+    w.setSizePolicy(sp)
+    return w
 
 
 def make_table() -> tuple[QTableView, DataFrameModel]:

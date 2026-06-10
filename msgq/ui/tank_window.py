@@ -19,7 +19,7 @@ from __future__ import annotations
 import traceback
 
 import pandas as pd
-from PySide6.QtCore import Qt, QSettings, QTimer
+from PySide6.QtCore import Qt, QSettings, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QMainWindow, QMessageBox, QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget,
@@ -33,12 +33,49 @@ from msgq.storage import Database
 from msgq.ui import theme
 from msgq.ui.charts import BarChart, TimeSeriesChart
 from msgq.ui.common import (
-    kpi_label, language_selector, make_table, theme_selector, warn_label, wrap_with_search,
+    BusyOverlay, kpi_label, language_selector, make_table, theme_selector,
+    warn_label, wrap_with_search,
 )
 
 # Opciones de rango temporal: (etiqueta canónica, días hacia atrás | None=todo).
 _RANGES = [("Todo el rango", None), ("Últimos 7 días", 7),
            ("Últimos 30 días", 30), ("Últimos 90 días", 90), ("Últimos 12 meses", 365)]
+
+
+class _LoadWorker(QThread):
+    """Lee la réplica en un hilo aparte para no congelar la interfaz: la lectura
+    de 20.000 movimientos en el hilo de la GUI era lo que trababa esta ventana
+    en cada auto-refresco. Emite los DataFrames listos; la GUI solo proyecta."""
+
+    done = Signal(object, object, object, object, object)  # recons, tanks, mov, eq, counts
+    failed = Signal(str)
+
+    # Columnas de `movements` que el análisis de tanques consume (tank_analytics):
+    # filtrar el SELECT reduce varias veces la conversión SQLite -> DataFrame.
+    _MOVEMENT_COLS = [
+        "id", "kind", "product", "volume", "tank", "updated_at",
+        "equipment_id", "equipment_description", "status", "cost_centre",
+    ]
+
+    def __init__(self, db: Database, parent=None):
+        super().__init__(parent)
+        self._db = db
+
+    def run(self) -> None:  # noqa: D401 - QThread entrypoint
+        try:
+            rdb = Database(self._db.path, create=False)
+            try:
+                recons = rdb.get_reconciliations()
+                tanks = rdb.get_tanks()
+                mov = rdb.read("movements", order_by='"updated_at" DESC',
+                               limit=20000, columns=self._MOVEMENT_COLS)
+                eq = rdb.get_equipment()
+                counts = (rdb.row_count("reconciliations"), rdb.row_count("movements"))
+            finally:
+                rdb.close()
+            self.done.emit(recons, tanks, mov, eq, counts)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"{exc}\n\n{traceback.format_exc()}")
 
 
 class TankWindow(QMainWindow):
@@ -54,6 +91,9 @@ class TankWindow(QMainWindow):
         self._mov = pd.DataFrame()
         self._eq = pd.DataFrame()
         self._last_counts = None
+        self._worker: _LoadWorker | None = None
+        self._pending_refresh = False
+        self._busy: BusyOverlay | None = None
         self.setWindowTitle(t("MSGQ — Análisis de Tanques  ·  Newmont Merian"))
         self.resize(1420, 880)
 
@@ -67,6 +107,8 @@ class TankWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802
         self._timer.stop()
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.wait(3000)
         event.accept()
 
     # --- Idioma / tema ------------------------------------------------------
@@ -103,6 +145,8 @@ class TankWindow(QMainWindow):
         lay.addWidget(self._build_kpis())
         lay.addWidget(self._build_tabs(), stretch=1)
         self.setCentralWidget(root)
+        # Indicador de carga (cubre el área central durante la lectura inicial).
+        self._busy = BusyOverlay(root, t("Cargando datos…"))
 
     def _build_controls(self) -> QGroupBox:
         box = QGroupBox(t("Filtros")); row = QHBoxLayout(box)
@@ -175,18 +219,39 @@ class TankWindow(QMainWindow):
     # --- Datos --------------------------------------------------------------
 
     def _refresh(self):
+        """Relee la réplica EN SEGUNDO PLANO y luego proyecta. Antes leía 20.000
+        movimientos en el hilo de la GUI y la ventana entera se congelaba en cada
+        auto-refresco; ahora la lectura va en `_LoadWorker` y aquí solo se pinta."""
+        if self._worker is not None and self._worker.isRunning():
+            self._pending_refresh = True   # se relanza al terminar el actual
+            return
+        if self._recons.empty and self._busy is not None:
+            self._busy.start(t("Cargando datos…"))
+        self._worker = _LoadWorker(self._db, self)
+        self._worker.done.connect(self._on_loaded)
+        self._worker.failed.connect(self._on_load_failed)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.start()
+
+    def _on_loaded(self, recons, tanks, mov, eq, counts):
+        self._worker = None
+        self._recons, self._tanks, self._mov, self._eq = recons, tanks, mov, eq
+        self._last_counts = counts
         try:
-            self._recons = self._db.get_reconciliations()
-            self._tanks = self._db.get_tanks()
-            self._mov = self._db.read("movements", order_by='"updated_at" DESC', limit=20000)
-            self._eq = self._db.get_equipment()
-            self._last_counts = (self._db.row_count("reconciliations"),
-                                 self._db.row_count("movements"))
             self._apply_filters()
             self._update_status()
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, t("Error al analizar"),
-                                 f"{exc}\n\n{traceback.format_exc()}")
+        finally:
+            if self._busy is not None:
+                self._busy.stop()
+        if self._pending_refresh:          # llegaron datos nuevos mientras cargaba
+            self._pending_refresh = False
+            self._refresh()
+
+    def _on_load_failed(self, message: str):
+        self._worker = None
+        if self._busy is not None:
+            self._busy.stop()
+        QMessageBox.critical(self, t("Error al analizar"), message)
 
     def _maybe_refresh(self):
         try:

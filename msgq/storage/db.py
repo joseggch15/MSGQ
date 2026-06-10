@@ -7,9 +7,11 @@ Por que una base intermedia y no consultar la API desde la interfaz:
   • Permite recuperar el ultimo `updated_from` (watermark) para sincronizar de
     forma incremental, sin re-descargar todo en cada ciclo.
 
-Concurrencia: el hilo de polling escribe y el hilo de la GUI lee. Se usa una
-unica conexion con `check_same_thread=False` protegida por un `Lock`, que es
-suficiente y seguro para el volumen de un sitio.
+Concurrencia: el hilo de polling ESCRIBE por una conexion unica protegida por un
+`Lock`; las LECTURAS abren su propia conexion efimera por llamada. Con WAL esa
+separacion es la que permite que un lector nunca espere al escritor (y viceversa):
+con la conexion compartida de antes, cada lectura de la GUI quedaba en cola
+detras del upsert del poller y la interfaz se congelaba durante el backfill.
 """
 from __future__ import annotations
 
@@ -104,6 +106,9 @@ class Database:
         """
         self._path = path
         self._lock = threading.Lock()
+        # Cache de columnas fisicas por tabla (PRAGMA table_info), para armar el
+        # SELECT explicito de `read()` una sola vez por entidad.
+        self._col_cache: dict[str, set[str]] = {}
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         # WAL: permite que un lector (GUI/worker) no bloquee al escritor (poller) y
@@ -183,25 +188,24 @@ class Database:
 
     def _df_to_records(self, entity: str, df: pd.DataFrame,
                        cols: list[str]) -> Iterable[tuple]:
+        # itertuples (posicional) en vez de iterrows: no materializa una Series por
+        # fila, lo que sobre miles de filas reduce el upsert de segundos a decimas.
         bool_cols = _BOOL[entity]
-        for _, row in df.iterrows():
-            out: list[Any] = []
-            for c in cols:
-                val = row.get(c) if c in df.columns else None
-                out.append(_to_sqlite(val, c in bool_cols))
-            yield tuple(out)
+        present = [c for c in cols if c in df.columns]
+        pos = {c: i for i, c in enumerate(present)}
+        getters = [(pos.get(c), c in bool_cols) for c in cols]
+        for row in df[present].itertuples(index=False, name=None):
+            yield tuple(_to_sqlite(row[i], b) if i is not None else None
+                        for i, b in getters)
 
     # -- watermark de sincronizacion ---------------------------------------
 
     def get_watermark(self, entity: str) -> datetime | None:
-        with self._lock:
-            cur = self._conn.execute(
-                "SELECT watermark FROM sync_state WHERE entity = ?", (entity,)
-            )
-            row = cur.fetchone()
-        if row and row["watermark"]:
+        row = self._read_one(
+            "SELECT watermark FROM sync_state WHERE entity = ?", (entity,))
+        if row and row[0]:
             try:
-                return datetime.fromisoformat(row["watermark"])
+                return datetime.fromisoformat(row[0])
             except ValueError:
                 return None
         return None
@@ -225,11 +229,9 @@ class Database:
     # va en la columna `watermark` como texto libre.
 
     def get_flag(self, name: str) -> str | None:
-        with self._lock:
-            cur = self._conn.execute(
-                "SELECT watermark FROM sync_state WHERE entity = ?", (name,))
-            row = cur.fetchone()
-        return row["watermark"] if row and row["watermark"] is not None else None
+        row = self._read_one(
+            "SELECT watermark FROM sync_state WHERE entity = ?", (name,))
+        return row[0] if row and row[0] is not None else None
 
     def set_flag(self, name: str, value: str) -> None:
         now = datetime.now().isoformat()
@@ -242,21 +244,72 @@ class Database:
             )
 
     # -- lectura ------------------------------------------------------------
+    # Cada lectura abre una conexion EFIMERA propia (WAL: instantanea consistente
+    # sin esperar el lock de escritura del poller) y trae las filas como TUPLAS.
+    # La conversion previa fila->dict creaba millones de objetos Python (242k
+    # movimientos x 46 columnas) reteniendo el GIL ~12s: era la causa principal
+    # de los congelamientos de la interfaz, incluso con workers en otro hilo.
+
+    def _open_read_conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._path, check_same_thread=False)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.Error:
+            pass
+        return conn
+
+    def _read_one(self, sql: str, params: tuple = ()) -> tuple | None:
+        conn = self._open_read_conn()
+        try:
+            return conn.execute(sql, params).fetchone()
+        finally:
+            conn.close()
+
+    def _existing_columns(self, entity: str) -> set[str]:
+        cached = self._col_cache.get(entity)
+        if cached is None:
+            conn = self._open_read_conn()
+            try:
+                rows = conn.execute(f'PRAGMA table_info("{entity}")').fetchall()
+            finally:
+                conn.close()
+            cached = {r[1] for r in rows}
+            self._col_cache[entity] = cached
+        return cached
 
     def read(self, entity: str, where: str = "", params: tuple = (),
-             order_by: str = "", limit: int | None = None) -> pd.DataFrame:
+             order_by: str = "", limit: int | None = None,
+             columns: list[str] | None = None) -> pd.DataFrame:
+        """Lee una entidad como DataFrame con el esquema canonico.
+
+        `columns` restringe el SELECT a un subconjunto de columnas canonicas
+        (en las tablas anchas, traer solo lo que la vista consume reduce varias
+        veces el costo de conversion). El resultado conserva el orden canonico.
+        """
         cols, _pk = _ENTITIES[entity]
-        sql = f"SELECT * FROM {entity}"
+        if columns is not None:
+            wanted = set(columns)
+            cols = [c for c in cols if c in wanted]
+        sel = [c for c in cols if c in self._existing_columns(entity)]
+        col_list = ", ".join(f'"{c}"' for c in sel)
+        sql = f"SELECT {col_list} FROM {entity}"
         if where:
             sql += f" WHERE {where}"
         if order_by:
             sql += f" ORDER BY {order_by}"
         if limit:
             sql += f" LIMIT {int(limit)}"
-        with self._lock:
-            cur = self._conn.execute(sql, params)
-            rows = [dict(r) for r in cur.fetchall()]
-        return self._records_to_df(entity, rows, cols)
+        conn = self._open_read_conn()
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+        df = self._records_to_df(entity, rows, sel)
+        if len(sel) != len(cols):
+            # Columnas canonicas aun no presentes en una replica vieja -> NA
+            # (mismo contrato que el SELECT * de antes).
+            df = df.reindex(columns=cols)
+        return df
 
     def get_movements(self, limit: int = 500, kind: str | None = None) -> pd.DataFrame:
         # `kind` (DISPENSE/TRANSFER/DELIVERY) permite poblar cada sub-pestana de
@@ -299,9 +352,8 @@ class Database:
         return self.read("product_history", order_by='"equipment_id"')
 
     def row_count(self, entity: str) -> int:
-        with self._lock:
-            cur = self._conn.execute(f"SELECT COUNT(*) AS n FROM {entity}")
-            return int(cur.fetchone()["n"])
+        row = self._read_one(f"SELECT COUNT(*) FROM {entity}")
+        return int(row[0]) if row else 0
 
     def purge_simulator_movements(self) -> int:
         """Borra movimientos del SIMULADOR (id 'SIM-%') que pudieran haber quedado
@@ -312,9 +364,10 @@ class Database:
             cur = self._conn.execute("DELETE FROM movements WHERE id LIKE 'SIM-%'")
             return max(0, cur.rowcount or 0)
 
-    def _records_to_df(self, entity: str, rows: list[dict],
+    def _records_to_df(self, entity: str, rows: list[tuple],
                        cols: list[str]) -> pd.DataFrame:
-        df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
+        df = (pd.DataFrame.from_records(rows, columns=cols) if rows
+              else pd.DataFrame(columns=cols))
         for c in _NUMERIC[entity]:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")

@@ -24,7 +24,7 @@ import traceback
 from PySide6.QtCore import QSettings, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QSpinBox, QStyle, QSystemTrayIcon, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -37,7 +37,8 @@ from msgq.logging_setup import get_logger
 from msgq.storage import Database
 from msgq.ui import theme
 from msgq.ui.common import (
-    kpi_label, language_selector, make_table, theme_selector, warn_label, wrap_with_search,
+    FlowLayout, flow_bar, kpi_label, language_selector, make_button, make_table,
+    theme_selector, warn_label, wrap_with_search,
 )
 
 log = get_logger("ui.main")
@@ -105,6 +106,60 @@ def _project_for_kind(df, kind):
     rest = [c for c in df.columns
             if c not in preset and c != "kind" and has_data(c)]
     return df[front + rest]
+
+
+class _ViewsWorker(QThread):
+    """Lee la replica y prepara TODO lo que el refresco visual proyecta (tablas de
+    movimientos/equipos/consolas, alertas livianas de 24h combinadas con la cache
+    de pesadas, KPIs) en un hilo aparte. Antes estas lecturas corrian en el hilo
+    de la GUI en cada ciclo de sync; durante el backfill quedaban en cola detras
+    de las escrituras del poller y la ventana entraba en 'No responde'."""
+
+    done = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, db_path: str, heavy: dict, parent=None):
+        super().__init__(parent)
+        self._path = db_path
+        self._heavy = heavy   # caches de alertas pesadas (solo lectura)
+
+    def run(self) -> None:  # noqa: D401 - QThread entrypoint
+        try:
+            rdb = Database(self._path, create=False)
+            try:
+                disp = rdb.get_movements(limit=1000, kind="DISPENSE")
+                trans = rdb.get_movements(limit=1000, kind="TRANSFER")
+                deliv = rdb.get_movements(limit=1000, kind="DELIVERY")
+                eq = rdb.get_equipment()
+                mac = rdb.get_adaptmac()
+                recent = rdb.recent_movements(hours=24)
+                limits = rdb.get_consumption_limits()
+            finally:
+                rdb.close()
+            sfl_alerts = al.detect_sfl_alerts(recent, limits)
+            sfl_conflicts = al.detect_sfl_conflict_alerts(recent, limits)
+            h = self._heavy
+            all_alerts = al.combine(
+                al.detect_movement_alerts(recent),
+                al.detect_adaptmac_alerts(mac),
+                sfl_alerts,
+                sfl_conflicts,
+                h["burn"], h["hw"], h["product"], h["vd"], h["th"],
+            )
+            self.done.emit({
+                "disp": _project_for_kind(disp, "DISPENSE"),
+                "trans": _project_for_kind(trans, "TRANSFER"),
+                "deliv": _project_for_kind(deliv, "DELIVERY"),
+                "eq": eq,
+                "mac": mac,
+                "alerts": all_alerts,
+                "summary": al.alert_summary(all_alerts),
+                "kpis": al.compute_kpis(recent, eq, mac, all_alerts),
+                "sfl_live": al.combine(sfl_alerts, sfl_conflicts),
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Worker de vistas fallo")
+            self.failed.emit(str(exc))
 
 
 class _AlertsWorker(QThread):
@@ -212,6 +267,10 @@ class MainWindow(QMainWindow):
         self._alerts_worker: _AlertsWorker | None = None
         self._alerts_pool = None
         self._last_heavy_spawn = 0.0
+        # Worker del refresco visual: las lecturas y la deteccion liviana corren
+        # fuera del hilo de la GUI; aqui solo se proyectan los resultados.
+        self._views_worker: _ViewsWorker | None = None
+        self._views_pending = False
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(_REFRESH_MS)
@@ -324,84 +383,78 @@ class MainWindow(QMainWindow):
         r2.addWidget(self.chk_demo)
         r2.addStretch(1)
 
-        self.btn_start = QPushButton(t("Iniciar monitoreo"))
-        self.btn_start.setObjectName("accent")
-        self.btn_start.clicked.connect(self._on_start)
+        self.btn_start = make_button(t("Iniciar monitoreo"), self._on_start,
+                                     object_name="accent")
         r2.addWidget(self.btn_start)
 
-        self.btn_stop = QPushButton(t("Detener"))
-        self.btn_stop.setObjectName("danger")
+        self.btn_stop = make_button(t("Detener"), self._on_stop, object_name="danger")
         self.btn_stop.setEnabled(False)
-        self.btn_stop.clicked.connect(self._on_stop)
         r2.addWidget(self.btn_stop)
         col.addLayout(r2)
 
-        # Fila 3 — carga de snapshots locales (sin token ni red).
+        # Fila 3 — carga de snapshots locales (sin token ni red) + su ayuda.
         r3 = QHBoxLayout()
-        self.btn_import_eq = QPushButton(t("Importar equipos (CSV de AdaptIQ)…"))
-        self.btn_import_eq.clicked.connect(self._on_import_equipment)
+        self.btn_import_eq = make_button(t("Importar equipos (CSV de AdaptIQ)…"),
+                                         self._on_import_equipment)
         r3.addWidget(self.btn_import_eq)
         hint = QLabel(t("Carga el maestro completo de equipos desde un export CSV "
                         "(no requiere token ni red)."))
         hint.setStyleSheet("color:#5A6B7B;")
-        r3.addWidget(hint)
-        r3.addStretch(1)
-        self.btn_analyze = QPushButton(t("Analizar equipos…"))
-        self.btn_analyze.setObjectName("accent")
-        self.btn_analyze.setToolTip(t(
-            "Abre el análisis de flota: filtros, frecuencia de cambio de RFID, "
-            "transiciones In↔Out, auditoría y gráficas."))
-        self.btn_analyze.clicked.connect(self._on_open_equipment)
-        r3.addWidget(self.btn_analyze)
-        self.btn_tanks = QPushButton(t("Analizar tanques…"))
-        self.btn_tanks.setToolTip(t(
-            "Abre el análisis de tanques: reconciliación, niveles, despachos y gráficas "
-            "(en vivo desde el endpoint)."))
-        self.btn_tanks.clicked.connect(self._on_open_tanks)
-        r3.addWidget(self.btn_tanks)
-        self.btn_inventory = QPushButton(t("Inventario de tags RFID…"))
-        self.btn_inventory.setToolTip(t(
-            "Abre el reporte de instalación de tags RFID (alta/reemplazo/remoción) con "
-            "la fecha real del cambio, en vivo desde el endpoint."))
-        self.btn_inventory.clicked.connect(self._on_open_inventory)
-        r3.addWidget(self.btn_inventory)
-        self.btn_sfl = QPushButton(t("Despachos sobre SFL…"))
-        self.btn_sfl.setObjectName("danger")
-        self.btn_sfl.setToolTip(t(
-            "Audita los despachos cuyo volumen excede el Safe Fill Level del equipo "
-            "(sobrellenado), en vivo desde el endpoint."))
-        self.btn_sfl.clicked.connect(self._on_open_sfl)
-        r3.addWidget(self.btn_sfl)
-        self.btn_burn = QPushButton(t("Auditar Burn Rate…"))
-        self.btn_burn.setObjectName("danger")
-        self.btn_burn.setToolTip(t(
-            "Audita el burn rate (consumo L/h) por equipo y categoría, marca los "
-            "comportamientos anómalos y los grafica, en vivo desde el endpoint."))
-        self.btn_burn.clicked.connect(self._on_open_burn_rate)
-        r3.addWidget(self.btn_burn)
-        self.btn_hw = QPushButton(t("Salud de Hardware…"))
-        self.btn_hw.setObjectName("danger")
-        self.btn_hw.setToolTip(t(
-            "Audita la salud del hardware: SMU en regresión/estancado, re-tagueo "
-            "RFID sospechoso y degradación de medidores; genera órdenes de trabajo."))
-        self.btn_hw.clicked.connect(self._on_open_hardware)
-        r3.addWidget(self.btn_hw)
-        self.btn_vd = QPushButton(t("Desviación de volumen…"))
-        self.btn_vd.setObjectName("danger")
-        self.btn_vd.setToolTip(t(
-            "Audita la desviación entre el volumen medido y el digitado de la guía en cada "
-            "entrega (sobre-facturación / medidor descalibrado), en vivo desde el endpoint."))
-        self.btn_vd.clicked.connect(self._on_open_volume_deviation)
-        r3.addWidget(self.btn_vd)
-        self.btn_th = QPushButton(t("Tag Hopping…"))
-        self.btn_th.setObjectName("danger")
-        self.btn_th.setToolTip(t(
-            "Audita el mismo tag despachando en dos lugares en un lapso imposible "
-            "(tag removido para robar combustible), en vivo desde el endpoint."))
-        self.btn_th.clicked.connect(self._on_open_tag_hopping)
-        r3.addWidget(self.btn_th)
+        hint.setWordWrap(True)
+        r3.addWidget(hint, stretch=1)
         col.addLayout(r3)
+
+        # Fila 4 — análisis/auditoría: barra fluida que envuelve al redimensionar.
+        col.addWidget(self._build_action_bar())
         return box
+
+    def _build_action_bar(self) -> QWidget:
+        """Botones de análisis/auditoría en un `FlowLayout`: conservan su tamaño
+        completo (no se truncan) y se reacomodan en varias filas al achicar la ventana.
+        Fuente única compartida por el banner kiosko y la caja de conexión."""
+        bar = flow_bar()
+        fl = bar.layout()
+        self.btn_analyze = make_button(
+            t("Analizar equipos…"), self._on_open_equipment, object_name="accent",
+            tooltip=t("Abre el análisis de flota: filtros, frecuencia de cambio de RFID, "
+                      "transiciones In↔Out, auditoría y gráficas."))
+        fl.addWidget(self.btn_analyze)
+        self.btn_tanks = make_button(
+            t("Analizar tanques…"), self._on_open_tanks,
+            tooltip=t("Abre el análisis de tanques: reconciliación, niveles, despachos y "
+                      "gráficas (en vivo desde el endpoint)."))
+        fl.addWidget(self.btn_tanks)
+        self.btn_inventory = make_button(
+            t("Inventario de tags RFID…"), self._on_open_inventory,
+            tooltip=t("Abre el reporte de instalación de tags RFID (alta/reemplazo/remoción) "
+                      "con la fecha real del cambio, en vivo desde el endpoint."))
+        fl.addWidget(self.btn_inventory)
+        self.btn_sfl = make_button(
+            t("Despachos sobre SFL…"), self._on_open_sfl, object_name="danger",
+            tooltip=t("Audita los despachos cuyo volumen excede el Safe Fill Level del "
+                      "equipo (sobrellenado), en vivo desde el endpoint."))
+        fl.addWidget(self.btn_sfl)
+        self.btn_burn = make_button(
+            t("Auditar Burn Rate…"), self._on_open_burn_rate, object_name="danger",
+            tooltip=t("Audita el burn rate (consumo L/h) por equipo y categoría, marca los "
+                      "comportamientos anómalos y los grafica, en vivo desde el endpoint."))
+        fl.addWidget(self.btn_burn)
+        self.btn_hw = make_button(
+            t("Salud de Hardware…"), self._on_open_hardware, object_name="danger",
+            tooltip=t("Audita la salud del hardware: SMU en regresión/estancado, re-tagueo "
+                      "RFID sospechoso y degradación de medidores; genera órdenes de trabajo."))
+        fl.addWidget(self.btn_hw)
+        self.btn_vd = make_button(
+            t("Desviación de volumen…"), self._on_open_volume_deviation, object_name="danger",
+            tooltip=t("Audita la desviación entre el volumen medido y el digitado de la guía "
+                      "en cada entrega (sobre-facturación / medidor descalibrado)."))
+        fl.addWidget(self.btn_vd)
+        self.btn_th = make_button(
+            t("Tag Hopping…"), self._on_open_tag_hopping, object_name="danger",
+            tooltip=t("Audita el mismo tag despachando en dos lugares en un lapso imposible "
+                      "(tag removido para robar combustible), en vivo desde el endpoint."))
+        fl.addWidget(self.btn_th)
+        return bar
 
     def _on_open_equipment(self):
         # Import perezoso: pyqtgraph solo se carga al abrir el análisis.
@@ -538,60 +591,43 @@ class MainWindow(QMainWindow):
             return None
 
     def _build_kiosk_banner(self) -> QGroupBox:
-        """Banner de la version turnkey (sin token por pantalla) + acceso al análisis."""
+        """Banner de la version turnkey (sin token por pantalla) + acceso al análisis.
+        Estado y selectores arriba; los botones de auditoría van en una barra fluida
+        (FlowLayout) que se reacomoda en varias filas al redimensionar, sin truncarse."""
         box = QGroupBox(t("Monitoreo en tiempo real"))
-        row = QHBoxLayout(box)
+        col = QVBoxLayout(box)
+        col.setSpacing(8)
+
+        top = QHBoxLayout()
         live = QLabel(f"●  {t('EN VIVO')}")
         live.setStyleSheet("color:#2E7D32; font-weight:bold;")
-        row.addWidget(live)
+        top.addWidget(live)
         site = self._settings.site_id or self._settings.site_match
         info = QLabel(f"{self._settings.endpoint}    ·    {t('Site:')} {site}    ·    "
                       f"{t('actualiza cada')} {self._settings.poll_seconds}s")
         info.setStyleSheet("color:#5A6B7B;")
-        row.addWidget(info)
-        row.addStretch(1)
-        row.addWidget(language_selector(self._on_language_changed))
-        row.addWidget(theme_selector(self._on_theme_changed))
-        self.btn_analyze = QPushButton(t("Analizar equipos…"))
-        self.btn_analyze.setObjectName("accent")
-        self.btn_analyze.clicked.connect(self._on_open_equipment)
-        row.addWidget(self.btn_analyze)
-        self.btn_tanks = QPushButton(t("Analizar tanques…"))
-        self.btn_tanks.clicked.connect(self._on_open_tanks)
-        row.addWidget(self.btn_tanks)
-        self.btn_inventory = QPushButton(t("Inventario de tags RFID…"))
-        self.btn_inventory.clicked.connect(self._on_open_inventory)
-        row.addWidget(self.btn_inventory)
-        self.btn_sfl = QPushButton(t("Despachos sobre SFL…"))
-        self.btn_sfl.setObjectName("danger")
-        self.btn_sfl.clicked.connect(self._on_open_sfl)
-        row.addWidget(self.btn_sfl)
-        self.btn_burn = QPushButton(t("Auditar Burn Rate…"))
-        self.btn_burn.setObjectName("danger")
-        self.btn_burn.clicked.connect(self._on_open_burn_rate)
-        row.addWidget(self.btn_burn)
-        self.btn_hw = QPushButton(t("Salud de Hardware…"))
-        self.btn_hw.setObjectName("danger")
-        self.btn_hw.clicked.connect(self._on_open_hardware)
-        row.addWidget(self.btn_hw)
-        self.btn_vd = QPushButton(t("Desviación de volumen…"))
-        self.btn_vd.setObjectName("danger")
-        self.btn_vd.clicked.connect(self._on_open_volume_deviation)
-        row.addWidget(self.btn_vd)
-        self.btn_th = QPushButton(t("Tag Hopping…"))
-        self.btn_th.setObjectName("danger")
-        self.btn_th.clicked.connect(self._on_open_tag_hopping)
-        row.addWidget(self.btn_th)
+        top.addWidget(info)
+        top.addStretch(1)
+        top.addWidget(language_selector(self._on_language_changed))
+        top.addWidget(theme_selector(self._on_theme_changed))
+        col.addLayout(top)
+
+        col.addWidget(self._build_action_bar())
         return box
 
     def _build_kpi_strip(self) -> QFrame:
         frame = QFrame()
         frame.setFrameShape(QFrame.StyledPanel)
         frame.setStyleSheet(f"QFrame{{background:{theme.panel_bg()}; border-radius:6px;}}")
-        self._kpi_layout = QHBoxLayout(frame)
+        # FlowLayout: las tarjetas KPI se reacomodan en varias filas si la ventana es
+        # angosta (en vez de comprimirse o salirse). heightForWidth en el frame deja
+        # que el layout padre le reserve el alto correcto al envolver.
+        self._kpi_layout = FlowLayout(frame, h_spacing=8, v_spacing=6)
         self._kpi_layout.setContentsMargins(8, 6, 8, 6)
         self._kpi_layout.addWidget(QLabel(t("Sin datos todavia.")))
-        self._kpi_layout.addStretch(1)
+        sp = frame.sizePolicy()
+        sp.setHeightForWidth(True)
+        frame.setSizePolicy(sp)
         return frame
 
     def _build_tabs(self) -> QTabWidget:
@@ -762,23 +798,6 @@ class MainWindow(QMainWindow):
         if not force and counts is not None and counts == getattr(self, "_last_counts", None):
             return
         self._last_counts = counts
-        try:
-            disp = self._db.get_movements(limit=1000, kind="DISPENSE")
-            trans = self._db.get_movements(limit=1000, kind="TRANSFER")
-            deliv = self._db.get_movements(limit=1000, kind="DELIVERY")
-            eq = self._db.get_equipment()
-            mac = self._db.get_adaptmac()
-            recent = self._db.recent_movements(hours=24)
-            limits = self._db.get_consumption_limits()
-        except Exception as exc:  # noqa: BLE001
-            self.statusBar().showMessage(f"{t('Error leyendo la replica')}: {exc}")
-            return
-
-        self.m_disp.set_dataframe(_project_for_kind(disp, "DISPENSE"))
-        self.m_trans.set_dataframe(_project_for_kind(trans, "TRANSFER"))
-        self.m_deliv.set_dataframe(_project_for_kind(deliv, "DELIVERY"))
-        self.m_eq.set_dataframe(eq)
-        self.m_mac.set_dataframe(mac)
 
         # Las alertas PESADAS (burn/hw/producto/desviacion/tag hopping) recorren todo
         # el historico: se calculan en SEGUNDO PLANO (no congelar la GUI). Aqui solo
@@ -798,8 +817,45 @@ class MainWindow(QMainWindow):
         if need_heavy:
             self._maybe_spawn_alerts_worker()
 
-        # Panel de alertas + KPIs con las alertas livianas (24h) + la cache de pesadas.
-        self._update_alert_panel(recent, mac, eq, limits)
+        # Lecturas + deteccion liviana en SEGUNDO PLANO (un worker a la vez; si
+        # llega otro refresco mientras carga, se relanza al terminar).
+        if self._views_worker is not None and self._views_worker.isRunning():
+            self._views_pending = True
+            return
+        heavy = {"burn": self._burn_alerts, "hw": self._hw_alerts,
+                 "product": self._product_alerts, "vd": self._vd_alerts,
+                 "th": self._th_alerts}
+        worker = _ViewsWorker(self._db.path, heavy, self)
+        worker.done.connect(self._on_views_ready)
+        worker.failed.connect(self._on_views_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._views_worker = worker
+        worker.start()
+
+    def _on_views_ready(self, out: dict) -> None:
+        """Proyecta en la interfaz lo que el worker preparo (solo trabajo de Qt)."""
+        self._views_worker = None
+        self.m_disp.set_dataframe(out["disp"])
+        self.m_trans.set_dataframe(out["trans"])
+        self.m_deliv.set_dataframe(out["deliv"])
+        self.m_eq.set_dataframe(out["eq"])
+        self.m_mac.set_dataframe(out["mac"])
+        self.m_alerts.set_dataframe(out["alerts"])
+        self.m_alert_sum.set_dataframe(out["summary"])
+        self._refresh_kpis(out["kpis"])
+        self._notify_sfl(out["sfl_live"])
+        self._notify_burn_rate(self._burn_alerts)
+        self._notify_hardware(self._hw_alerts)
+        self._notify_tag_hopping(self._th_alerts)
+        if self._views_pending:        # la replica cambio mientras se cargaba
+            self._views_pending = False
+            self._refresh_views(force=True)
+
+    def _on_views_failed(self, message: str) -> None:
+        self._views_worker = None
+        self._views_pending = False
+        self._last_counts = None       # fuerza el reintento en el proximo tick
+        self.statusBar().showMessage(f"{t('Error leyendo la replica')}: {message}")
 
     def _alerts_executor(self):
         """Pool de UN proceso para las alertas pesadas (creado perezosamente). Si no
@@ -857,43 +913,9 @@ class MainWindow(QMainWindow):
         self._product_count = mv_count
         self._vd_count = mv_count
         self._th_count = mv_count
-        # Rearma el panel con la cache recien actualizada (lecturas livianas de 24h).
-        try:
-            recent = self._db.recent_movements(hours=24)
-            mac = self._db.get_adaptmac()
-            eq = self._db.get_equipment()
-            limits = self._db.get_consumption_limits()
-        except Exception as exc:  # noqa: BLE001
-            self.statusBar().showMessage(f"{t('Error leyendo la replica')}: {exc}")
-            return
-        self._update_alert_panel(recent, mac, eq, limits)
-
-    def _update_alert_panel(self, recent, mac, eq, limits) -> None:
-        """Arma el panel de alertas, KPIs y notificaciones combinando las alertas
-        LIVIANAS (movimientos/AdaptMAC/SFL de las ultimas 24h) con la CACHE de las
-        pesadas (que mantiene el worker en segundo plano)."""
-        sfl_alerts = al.detect_sfl_alerts(recent, limits)
-        sfl_conflicts = al.detect_sfl_conflict_alerts(recent, limits)
-        all_alerts = al.combine(
-            al.detect_movement_alerts(recent),
-            al.detect_adaptmac_alerts(mac),
-            sfl_alerts,
-            sfl_conflicts,
-            self._burn_alerts,
-            self._hw_alerts,
-            self._product_alerts,
-            self._vd_alerts,
-            self._th_alerts,
-        )
-        self.m_alerts.set_dataframe(all_alerts)
-        self.m_alert_sum.set_dataframe(al.alert_summary(all_alerts))
-
-        kpis = al.compute_kpis(recent, eq, mac, all_alerts)
-        self._refresh_kpis(kpis)
-        self._notify_sfl(al.combine(sfl_alerts, sfl_conflicts))
-        self._notify_burn_rate(self._burn_alerts)
-        self._notify_hardware(self._hw_alerts)
-        self._notify_tag_hopping(self._th_alerts)
+        # Rearma el panel con la cache recien actualizada: el worker de vistas
+        # relee las alertas livianas (24h) en segundo plano y las combina.
+        self._refresh_views(force=True)
 
     def _notify_sfl(self, sfl_alerts):
         """Notificación de escritorio (toast) al detectar despachos sobre SFL nuevos.
@@ -1024,7 +1046,6 @@ class MainWindow(QMainWindow):
         ]
         for c in cards:
             self._kpi_layout.addWidget(c)
-        self._kpi_layout.addStretch(1)
 
     # =======================================================================
     # Cierre
@@ -1033,7 +1054,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):  # noqa: N802 - override Qt
         self._refresh_timer.stop()
         self._stop_poller()
-        # Espera al worker de alertas en vuelo para no destruirlo en ejecucion.
+        # Espera a los workers en vuelo para no destruirlos en ejecucion.
+        if self._views_worker is not None and self._views_worker.isRunning():
+            self._views_worker.wait(3000)
         if self._alerts_worker is not None and self._alerts_worker.isRunning():
             self._alerts_worker.wait(3000)
         # Cierra el pool de proceso de alertas (evita procesos huerfanos).

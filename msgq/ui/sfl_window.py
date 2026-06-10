@@ -45,6 +45,16 @@ class _LoadWorker(QThread):
     done = Signal(object, object, object, object)   # movements, limits, exc_all, conf_all
     failed = Signal(str)
 
+    # Columnas de `movements` que esta auditoria realmente consume (deteccion de
+    # excesos/conflictos, KPIs, progreso y tabla). Leer 13 de 46 columnas reduce
+    # varias veces la conversion SQLite->DataFrame (y el GIL que retiene), que es
+    # lo que congelaba la interfaz en cada recarga del historico completo.
+    _MOVEMENT_COLS = [
+        "id", "kind", "record_collected_at", "updated_at", "equipment_id",
+        "equipment_description", "equipment_status", "product", "volume",
+        "type", "status", "field_user", "tank",
+    ]
+
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
         self._db = db
@@ -56,7 +66,7 @@ class _LoadWorker(QThread):
             # esta lectura ve una instantanea consistente sin bloquear la sync).
             rdb = Database(self._db.path, create=False)
             try:
-                movements = rdb.read("movements")
+                movements = rdb.read("movements", columns=self._MOVEMENT_COLS)
                 limits = rdb.get_consumption_limits()
             finally:
                 rdb.close()
