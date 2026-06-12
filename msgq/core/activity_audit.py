@@ -308,59 +308,61 @@ def fueling_without_activity(movements: pd.DataFrame | None,
     sfl = _sfl_by_equipment(movements, limits, equipment)
     cat_map, desc_map = burn_rate._equipment_maps(equipment)
 
-    rows: list[dict] = []
-    for eid, sub in pairs.groupby("_eid", sort=False):
-        run: list[pd.Series] = []
-        for _, r in sub.iterrows():
-            if r["_frozen"]:
-                run.append(r)
-                continue
-            if run:
-                rows.extend(_close_run(eid, run, sfl, cat_map, desc_map,
-                                       min_n, min_d))
-                run = []
-        if run:
-            rows.extend(_close_run(eid, run, sfl, cat_map, desc_map,
-                                   min_n, min_d))
-    if not rows:
+    # Rachas de pares congelados CONSECUTIVOS por equipo, vectorizadas: cada
+    # cambio de equipo o de estado congelado/no-congelado abre un bloque nuevo
+    # (cumsum); los bloques congelados son las rachas. `pairs` ya viene ordenado
+    # por (equipo, fecha) desde `_smu_pairs`. Una racha de K pares abarca K+1
+    # lecturas; los litros que entraron SIN operar son TODOS los despachados
+    # despues de la primera lectura (incluidos los despachos intermedios sin
+    # SMU, via `_litres_window`; la primera lectura pudo reponer consumo
+    # legitimo previo).
+    block = ((pairs["_eid"] != pairs["_eid"].shift())
+             | (pairs["_frozen"] != pairs["_frozen"].shift())).cumsum()
+    fz = pairs[pairs["_frozen"]]
+    if fz.empty:
         return pd.DataFrame(columns=FROZEN_COLS)
-    out = pd.DataFrame(rows, columns=FROZEN_COLS)
+    keys = block[pairs["_frozen"]]
+
+    def _first(col: str) -> pd.Series:
+        s = (fz[col] if col in fz.columns else pd.Series(pd.NA, index=fz.index))
+        return s.groupby(keys, sort=False).first()
+
+    runs = pd.DataFrame({
+        "eid": fz["_eid"].groupby(keys, sort=False).first(),
+        "desde": fz["_date_prev"].groupby(keys, sort=False).first(),
+        "hasta": fz["_date"].groupby(keys, sort=False).last(),
+        "litros": fz["_litres_window"].groupby(keys, sort=False).sum(),
+        "n_pares": fz["_eid"].groupby(keys, sort=False).size(),
+        "smu_prev": fz["_smu_prev"].groupby(keys, sort=False).first(),
+        "desc": _first("equipment_description"),
+        "smu_type": _first("smu_type"),
+    })
+    runs["despachos"] = runs["n_pares"] + 1
+    runs["dias"] = (runs["hasta"] - runs["desde"]).dt.total_seconds() / 86400.0
+    runs = runs[(runs["despachos"] >= int(min_n)) & (runs["dias"] >= float(min_d))]
+    if runs.empty:
+        return pd.DataFrame(columns=FROZEN_COLS)
+
+    limit = runs["eid"].map(sfl)
+    desc_fb = runs["eid"].map(desc_map)
+    desc = runs["desc"].where(runs["desc"].notna(),
+                              desc_fb.where(desc_fb.notna(), runs["eid"]))
+    out = pd.DataFrame({
+        "equipment_id": runs["eid"],
+        "equipment_description": desc,
+        "category": runs["eid"].map(cat_map),
+        "desde": runs["desde"],
+        "hasta": runs["hasta"],
+        "dias": runs["dias"].round(1),
+        "despachos": runs["despachos"].astype(int),
+        "litros": runs["litros"].astype(float).round(1),
+        "sfl": limit.astype(float),
+        "sobre_sfl": (limit.notna() & (runs["litros"] > limit)).astype(bool),
+        "smu_estancado": runs["smu_prev"].astype(float).round(1),
+        "smu_type": runs["smu_type"],
+    }, columns=FROZEN_COLS)
     return (out.sort_values(["sobre_sfl", "litros"], ascending=[False, False])
             .reset_index(drop=True))
-
-
-def _close_run(eid: str, run: list, sfl: pd.Series, cat_map: dict,
-               desc_map: dict, min_n: int, min_d: float) -> list[dict]:
-    """Consolida una racha de pares congelados en una fila (si pasa umbrales).
-    Una racha de K pares abarca K+1 lecturas; los litros que entraron SIN
-    operar son TODOS los despachados despues de la primera lectura (incluidos
-    los despachos intermedios sin SMU, via `_litres_window`; la primera lectura
-    pudo reponer consumo legitimo previo)."""
-    n_disp = len(run) + 1
-    first, last = run[0], run[-1]
-    days = ((last["_date"] - first["_date_prev"]).total_seconds() / 86400.0)
-    if n_disp < min_n or days < float(min_d):
-        return []
-    litres = float(sum(r["_litres_window"] for r in run))
-    limit = sfl.get(eid)
-    over = bool(limit is not None and not pd.isna(limit) and litres > float(limit))
-    desc = first.get("equipment_description")
-    if desc is None or pd.isna(desc):
-        desc = desc_map.get(eid, eid)
-    return [{
-        "equipment_id": eid,
-        "equipment_description": desc,
-        "category": cat_map.get(eid),
-        "desde": first["_date_prev"],
-        "hasta": last["_date"],
-        "dias": round(days, 1),
-        "despachos": n_disp,
-        "litros": round(litres, 1),
-        "sfl": None if limit is None or pd.isna(limit) else float(limit),
-        "sobre_sfl": over,
-        "smu_estancado": round(float(first["_smu_prev"]), 1),
-        "smu_type": first.get("smu_type"),
-    }]
 
 
 # ===========================================================================

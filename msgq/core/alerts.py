@@ -96,7 +96,14 @@ def _high_contamination(mv: pd.DataFrame) -> list[dict]:
         ("avg_contamination_6", "6um"),
         ("avg_contamination_14", "14um"),
     ]
-    for _, r in mv.iterrows():
+    # Prefiltro vectorizado: solo se recorren las filas que superan ALGUN umbral
+    # (lo normal es que ninguna lo haga; antes se iteraba todo el lote).
+    any_breach = pd.Series(False, index=mv.index)
+    for col, label in channels:
+        if col in mv.columns:
+            vals = pd.to_numeric(mv[col], errors="coerce")
+            any_breach |= vals >= config.CONTAMINATION_WARN[label]
+    for _, r in mv[any_breach].iterrows():
         breached = []
         for col, label in channels:
             val = r.get(col)

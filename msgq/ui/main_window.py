@@ -17,20 +17,21 @@ Ejecutar:  python run.py
 """
 from __future__ import annotations
 
+import importlib
 import os
 import time
 import traceback
 
 from PySide6.QtCore import QSettings, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGroupBox,
+    QApplication, QCheckBox, QFileDialog, QFrame, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QSpinBox, QStyle, QSystemTrayIcon, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from msgq.config import Settings, load_embedded_settings, demo_db_path, DEFAULT_DB_PATH
 from msgq.core import alerts as al
-from msgq.i18n import LANGUAGES, current_language, set_language, t, tr_fmt
+from msgq.i18n import current_language, set_language, t, tr_fmt
 from msgq.ingest import Poller
 from msgq.io import load_equipment_csv
 from msgq.logging_setup import get_logger
@@ -469,122 +470,50 @@ class MainWindow(QMainWindow):
         fl.addWidget(self.btn_act)
         return bar
 
-    def _on_open_equipment(self):
-        # Import perezoso: pyqtgraph solo se carga al abrir el análisis.
+    def _open_module(self, attr: str, module: str, cls: str) -> None:
+        """Abre una ventana de análisis/auditoría con import perezoso (pyqtgraph
+        solo se carga al abrir el primer módulo). Implementación única para todos
+        los botones: solo varían el módulo y la clase; el manejo de errores y el
+        ciclo de vida de la ventana son idénticos."""
         try:
-            from msgq.ui.equipment_window import EquipmentWindow
+            win_cls = getattr(importlib.import_module(module), cls)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self, t("Falta pyqtgraph"),
-                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
+                f"{t('No se pudo abrir el módulo:')}\n{exc}\n\n"
                 f"{t('Instala la dependencia: pip install pyqtgraph')}")
             return
-        self._eq_window = EquipmentWindow(self._db, self)
-        self._eq_window.show()
+        win = win_cls(self._db, self)
+        setattr(self, attr, win)
+        win.show()
+
+    def _on_open_equipment(self):
+        self._open_module("_eq_window", "msgq.ui.equipment_window", "EquipmentWindow")
 
     def _on_open_tanks(self):
-        # Import perezoso: pyqtgraph solo se carga al abrir el análisis.
-        try:
-            from msgq.ui.tank_window import TankWindow
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(
-                self, t("Falta pyqtgraph"),
-                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
-                f"{t('Instala la dependencia: pip install pyqtgraph')}")
-            return
-        self._tank_window = TankWindow(self._db, self)
-        self._tank_window.show()
+        self._open_module("_tank_window", "msgq.ui.tank_window", "TankWindow")
 
     def _on_open_inventory(self):
-        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
-        try:
-            from msgq.ui.inventory_window import InventoryWindow
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(
-                self, t("Falta pyqtgraph"),
-                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
-                f"{t('Instala la dependencia: pip install pyqtgraph')}")
-            return
-        self._inv_window = InventoryWindow(self._db, self)
-        self._inv_window.show()
+        self._open_module("_inv_window", "msgq.ui.inventory_window", "InventoryWindow")
 
     def _on_open_sfl(self):
-        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
-        try:
-            from msgq.ui.sfl_window import SFLWindow
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(
-                self, t("Falta pyqtgraph"),
-                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
-                f"{t('Instala la dependencia: pip install pyqtgraph')}")
-            return
-        self._sfl_window = SFLWindow(self._db, self)
-        self._sfl_window.show()
+        self._open_module("_sfl_window", "msgq.ui.sfl_window", "SFLWindow")
 
     def _on_open_burn_rate(self):
-        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
-        try:
-            from msgq.ui.burn_rate_window import BurnRateWindow
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(
-                self, t("Falta pyqtgraph"),
-                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
-                f"{t('Instala la dependencia: pip install pyqtgraph')}")
-            return
-        self._burn_window = BurnRateWindow(self._db, self)
-        self._burn_window.show()
+        self._open_module("_burn_window", "msgq.ui.burn_rate_window", "BurnRateWindow")
 
     def _on_open_hardware(self):
-        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
-        try:
-            from msgq.ui.hardware_window import HardwareWindow
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(
-                self, t("Falta pyqtgraph"),
-                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
-                f"{t('Instala la dependencia: pip install pyqtgraph')}")
-            return
-        self._hw_window = HardwareWindow(self._db, self)
-        self._hw_window.show()
+        self._open_module("_hw_window", "msgq.ui.hardware_window", "HardwareWindow")
 
     def _on_open_volume_deviation(self):
-        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
-        try:
-            from msgq.ui.volume_deviation_window import VolumeDeviationWindow
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(
-                self, t("Falta pyqtgraph"),
-                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
-                f"{t('Instala la dependencia: pip install pyqtgraph')}")
-            return
-        self._vd_window = VolumeDeviationWindow(self._db, self)
-        self._vd_window.show()
+        self._open_module("_vd_window", "msgq.ui.volume_deviation_window",
+                          "VolumeDeviationWindow")
 
     def _on_open_tag_hopping(self):
-        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
-        try:
-            from msgq.ui.tag_hopping_window import TagHoppingWindow
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(
-                self, t("Falta pyqtgraph"),
-                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
-                f"{t('Instala la dependencia: pip install pyqtgraph')}")
-            return
-        self._th_window = TagHoppingWindow(self._db, self)
-        self._th_window.show()
+        self._open_module("_th_window", "msgq.ui.tag_hopping_window", "TagHoppingWindow")
 
     def _on_open_activity(self):
-        # Import perezoso: pyqtgraph solo se carga al abrir el módulo.
-        try:
-            from msgq.ui.activity_window import ActivityWindow
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(
-                self, t("Falta pyqtgraph"),
-                f"{t('No se pudo abrir el análisis de equipos:')}\n{exc}\n\n"
-                f"{t('Instala la dependencia: pip install pyqtgraph')}")
-            return
-        self._act_window = ActivityWindow(self._db, self)
-        self._act_window.show()
+        self._open_module("_act_window", "msgq.ui.activity_window", "ActivityWindow")
 
     def _effective_db_path(self) -> str:
         """Ruta del replica segun el modo: demo en archivo aparte, real en el suyo."""
@@ -814,13 +743,15 @@ class MainWindow(QMainWindow):
 
     def _refresh_views(self, force: bool = False):
         # Evita recalcular si la replica no cambio (el QTimer dispara seguido,
-        # pero los datos solo cambian por poll): mantiene la UI fluida.
+        # pero los datos solo cambian por poll): mantiene la UI fluida. Una sola
+        # consulta/conexion para los 4 conteos (antes eran 4 conexiones efimeras
+        # por tick en el hilo de la GUI).
         try:
-            counts = (self._db.row_count("movements"),
-                      self._db.row_count("equipment"),
-                      self._db.row_count("adaptmac"))
+            all_counts = self._db.row_counts(
+                "movements", "equipment", "adaptmac", "change_events")
         except Exception:  # noqa: BLE001
-            counts = None
+            all_counts = None
+        counts = all_counts[:3] if all_counts else None
         if not force and counts is not None and counts == getattr(self, "_last_counts", None):
             return
         self._last_counts = counts
@@ -829,10 +760,7 @@ class MainWindow(QMainWindow):
         # el historico: se calculan en SEGUNDO PLANO (no congelar la GUI). Aqui solo
         # se decide si hay que relanzar el worker; el panel se arma con la cache.
         mv_count = counts[0] if counts else None
-        try:
-            chg_count = self._db.row_count("change_events")
-        except Exception:  # noqa: BLE001
-            chg_count = None
+        chg_count = all_counts[3] if all_counts else None
         need_heavy = (
             mv_count != self._burn_count
             or (mv_count, chg_count) != self._hw_key
@@ -1088,10 +1016,15 @@ class MainWindow(QMainWindow):
             self._views_worker.wait(3000)
         if self._alerts_worker is not None and self._alerts_worker.isRunning():
             self._alerts_worker.wait(3000)
-        # Cierra el pool de proceso de alertas (evita procesos huerfanos).
+        # Cierra el pool de proceso de alertas (evita procesos huerfanos). Si un
+        # calculo pesado sigue corriendo, `shutdown(wait=False)` NO lo detiene y el
+        # atexit de concurrent.futures esperaria a que termine (minutos): se
+        # terminan los procesos hijos explicitamente para que la app muera al toque.
         if self._alerts_pool:
             try:
                 self._alerts_pool.shutdown(wait=False, cancel_futures=True)
+                for proc in getattr(self._alerts_pool, "_processes", {}).values():
+                    proc.terminate()
             except Exception:  # noqa: BLE001
                 pass
         try:

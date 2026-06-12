@@ -30,8 +30,7 @@ from msgq.storage import Database
 from msgq.ui import theme
 from msgq.ui.charts import BarChart
 from msgq.ui.common import (
-    BusyOverlay, PaginatedTableView, kpi_label, language_selector, make_table,
-    theme_selector, warn_label,
+    BusyOverlay, PaginatedTableView, kpi_label, language_selector, theme_selector, warn_label,
 )
 
 _RANGES = (

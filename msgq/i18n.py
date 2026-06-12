@@ -274,6 +274,7 @@ _EN.update({
     "Falta pyqtgraph": "pyqtgraph missing",
     "No se pudo abrir el análisis de equipos:":
         "Could not open the equipment analysis:",
+    "No se pudo abrir el módulo:": "Could not open the module:",
     "Instala la dependencia: pip install pyqtgraph":
         "Install the dependency: pip install pyqtgraph",
     "Falta token": "Token missing",
@@ -404,7 +405,6 @@ _EN.update({
     "Contratista/Depto": "Contractor/Dept.",
     "Cost Centre": "Cost Centre",
     "Severidad": "Severity",
-    "Alertas": "Alerts",
     "Tags (registros)": "Tags (records)",
     "Cambios CC": "CC changes",
     # --- etiquetas de atributos del audit log (config.ATTR_LABELS) ---
@@ -503,7 +503,6 @@ _EN.update({
     "Transferencias salida (L)": "Transfers out (L)",
     "Neto transacciones (L)": "Net transactions (L)",
     "Neto (L)": "Net (L)",
-    "Volumen despachado (L)": "Dispensed volume (L)",
 })
 
 # --- Módulo de Inventario de Tags RFID ('Inventory Tag Installed') ----------

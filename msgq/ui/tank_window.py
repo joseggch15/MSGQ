@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QMainWindow, QMessageBox, QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from msgq import config
 from msgq.core import tank_analytics as ta
 from msgq.export import export_sheets
 from msgq.i18n import current_language, set_language, t, tr_fmt

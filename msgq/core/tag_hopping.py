@@ -98,30 +98,38 @@ def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 2 * _EARTH_RADIUS_KM * math.asin(min(1.0, math.sqrt(h)))
 
 
-def _equipment_maps(equipment: pd.DataFrame | None) -> dict[str, dict]:
-    """Mapa {equipment_id: {rfid, category, description, light}} del maestro, para
-    resolver el tag, la categoria (filtro de la ventana) y el tipo de vehiculo
-    (umbral de velocidad). Vacio si no hay maestro."""
-    out: dict[str, dict] = {}
+def _equipment_maps(equipment: pd.DataFrame | None) -> tuple[dict, dict, dict, set]:
+    """({id: tag}, {id: categoria}, {id: descripcion}, {ids de vehiculo ligero})
+    del maestro, para resolver el tag, la categoria (filtro de la ventana) y el
+    tipo de vehiculo (umbral de velocidad). Vacios si no hay maestro."""
+    tags: dict[str, str] = {}
+    cats: dict[str, object] = {}
+    descs: dict[str, object] = {}
+    light: set[str] = set()
     if equipment is None or equipment.empty or "equipment_id" not in equipment.columns:
-        return out
-    cols = equipment.columns
-    for _, e in equipment.iterrows():
-        eid = e.get("equipment_id")
+        return tags, cats, descs, light
+
+    def _col(name: str):
+        return (equipment[name] if name in equipment.columns
+                else [None] * len(equipment))
+
+    for eid, rfid, cat, desc, lv in zip(equipment["equipment_id"], _col("rfid"),
+                                        _col("category"), _col("description"),
+                                        _col("is_light_vehicle")):
         if _is_blank(eid):
             continue
-        rfid = e.get("rfid") if "rfid" in cols else None
-        tag = None
+        key = str(eid).strip()
         if not _is_blank(rfid):
-            tag = str(rfid).split(",")[0].strip().upper() or None
-        lv = e.get("is_light_vehicle") if "is_light_vehicle" in cols else None
-        out[str(eid).strip()] = {
-            "tag": tag,
-            "category": e.get("category") if "category" in cols else None,
-            "description": e.get("description") if "description" in cols else None,
-            "light": (not _is_blank(lv)) and bool(lv),
-        }
-    return out
+            tag = str(rfid).split(",")[0].strip().upper()
+            if tag:
+                tags[key] = tag
+        if not _is_blank(cat):
+            cats[key] = cat
+        if not _is_blank(desc):
+            descs[key] = desc
+        if (not _is_blank(lv)) and bool(lv):
+            light.add(key)
+    return tags, cats, descs, light
 
 
 def _location_series(df: pd.DataFrame) -> pd.Series:
@@ -227,72 +235,88 @@ def tag_hops(movements: pd.DataFrame | None,
     if cand.empty:
         return _empty(EVENT_COLS)
 
-    emaps = _equipment_maps(equipment)
+    tag_map, cat_map, desc_map, light_ids = _equipment_maps(equipment)
     slack_min = max(0.0, config.TAG_HOP_CLOCK_SLACK_MIN)
-    rows: list[dict] = []
-    for _, r in cand.iterrows():
-        gap_s = (r["_t"] - r["_t_prev"]).total_seconds()
-        gap_min = gap_s / 60.0
-        # Regla 1 — solapamiento: el actual empieza antes de que termine el previo,
-        # PERO solo cuenta como robo si es el MISMO producto en ambos puntos. Dos
-        # productos distintos solapados = servicio multi-producto (diesel + lubricantes
-        # desde un service truck o el taller al mismo equipo), no robo de combustible.
-        overlap_min = (r["_dur_prev"] / 60.0) - gap_min   # min que se solapan
-        same_product = (not _is_blank(r["_prod"]) and not _is_blank(r["_prod_prev"])
-                        and str(r["_prod"]) == str(r["_prod_prev"]))
-        is_overlap = (overlap_min > slack_min) and same_product
 
-        # Regla 2 — velocidad implicita (si hay coordenadas en ambos extremos).
-        distance_km = None
-        speed_kmh = None
-        is_speed = False
-        ca, cb = r["_coords_prev"], r["_coords"]
-        if ca is not None and cb is not None:
-            distance_km = haversine_km(ca, cb)
-            if distance_km >= config.TAG_HOP_MIN_DISTANCE_KM:
-                hours = gap_s / 3600.0
-                speed_kmh = float("inf") if hours <= 0 else distance_km / hours
-                info = emaps.get(str(r["_eid"]), {})
-                limit = (config.TAG_HOP_LIGHT_MAX_SPEED_KMH if info.get("light")
-                         else config.TAG_HOP_MAX_SPEED_KMH)
-                is_speed = speed_kmh > limit
+    # Evaluacion VECTORIZADA de los candidatos (sobre el historico real son
+    # decenas de miles de pares; fila a fila tardaba minutos en el proceso de
+    # alertas pesadas).
+    cand = cand.copy()
+    gap_s = (cand["_t"] - cand["_t_prev"]).dt.total_seconds()
+    gap_min = gap_s / 60.0
 
-        if not (is_overlap or is_speed):
+    # Regla 1 — solapamiento: el actual empieza antes de que termine el previo,
+    # PERO solo cuenta como robo si es el MISMO producto en ambos puntos. Dos
+    # productos distintos solapados = servicio multi-producto (diesel + lubricantes
+    # desde un service truck o el taller al mismo equipo), no robo de combustible.
+    overlap_min = cand["_dur_prev"] / 60.0 - gap_min      # min que se solapan
+    prod, prod_prev = cand["_prod"], cand["_prod_prev"]
+    same_product = (prod.notna() & prod_prev.notna()
+                    & ~prod.isin(_BLANK) & ~prod_prev.isin(_BLANK)
+                    & (prod == prod_prev))
+    is_overlap = ((overlap_min > slack_min) & same_product).fillna(False).astype(bool)
+
+    # Regla 2 — velocidad implicita: solo el pequeno subconjunto con coordenadas
+    # en ambos extremos (en Merian, ~0,4% de los despachos: surtidores moviles).
+    distance_km = pd.Series(float("nan"), index=cand.index)
+    speed_kmh = pd.Series(float("nan"), index=cand.index)
+    is_speed = pd.Series(False, index=cand.index)
+    has_coords = cand["_coords"].notna() & cand["_coords_prev"].notna()
+    for ix in cand.index[has_coords]:
+        dist = haversine_km(cand.at[ix, "_coords_prev"], cand.at[ix, "_coords"])
+        distance_km.at[ix] = dist
+        if dist < config.TAG_HOP_MIN_DISTANCE_KM:
             continue
-        if is_overlap:
-            reason, severity = config.TAG_HOP_REASON_OVERLAP, "CRITICAL"
-        else:
-            reason = config.TAG_HOP_REASON_SPEED
-            # Teletransporte (sin tiempo entre puntos distantes) = CRITICO; una
-            # velocidad alta pero finita es WARNING (a investigar).
-            severity = "CRITICAL" if gap_min <= slack_min else "WARNING"
+        hours = gap_s.at[ix] / 3600.0
+        spd = float("inf") if hours <= 0 else dist / hours
+        speed_kmh.at[ix] = spd
+        limit = (config.TAG_HOP_LIGHT_MAX_SPEED_KMH
+                 if str(cand.at[ix, "_eid"]) in light_ids
+                 else config.TAG_HOP_MAX_SPEED_KMH)
+        is_speed.at[ix] = spd > limit
 
-        info = emaps.get(str(r["_eid"]), {})
-        desc = r["_desc"]
-        if _is_blank(desc):
-            desc = info.get("description")
-        cat = info.get("category")
-        rows.append({
-            "equipment_id": r.get("equipment_id"),
-            "equipment_description": desc,
-            "tag": info.get("tag"),
-            "category": "(sin dato)" if _is_blank(cat) else cat,
-            "date_prev": r["_t_prev"],
-            "location_prev": r["_loc_prev"],
-            "date": r["_t"],
-            "location": r["_loc"],
-            "gap_min": round(gap_min, 1),
-            "distance_km": None if distance_km is None else round(distance_km, 2),
-            "speed_kmh": (None if speed_kmh is None
-                          else (None if math.isinf(speed_kmh) else round(speed_kmh, 1))),
-            "reason": reason,
-            "severity": severity,
-            "source_id_prev": r["_sid_prev"],
-            "source_id": r["_sid"],
-        })
-    if not rows:
+    hit_mask = is_overlap | is_speed
+    hits = cand[hit_mask]
+    if hits.empty:
         return _empty(EVENT_COLS)
-    out = pd.DataFrame(rows, columns=EVENT_COLS)
+
+    overlap_hit = is_overlap[hit_mask]
+    # Solapamiento = CRITICO. Por velocidad: teletransporte (sin tiempo entre
+    # puntos distantes) = CRITICO; velocidad alta pero finita = WARNING.
+    teleport = gap_min[hit_mask] <= slack_min
+    severity = (overlap_hit | teleport).map({True: "CRITICAL", False: "WARNING"})
+    reason = overlap_hit.map({True: config.TAG_HOP_REASON_OVERLAP,
+                              False: config.TAG_HOP_REASON_SPEED})
+
+    eid_str = hits["_eid"].astype(str)
+    desc_txt = hits["_desc"].astype("string").str.strip()
+    blank_desc = (hits["_desc"].isna() | desc_txt.eq("")
+                  | desc_txt.str.upper().isin(_BLANK))
+    desc = hits["_desc"].where(~blank_desc, eid_str.map(desc_map))
+    cat = eid_str.map(cat_map)
+    dist_r = distance_km[hit_mask].round(2)
+    # Velocidad infinita (teletransporte) se reporta como None, no como un numero.
+    spd_r = speed_kmh[hit_mask].replace([float("inf")], float("nan")).round(1)
+
+    out = pd.DataFrame({
+        "equipment_id": hits["equipment_id"],
+        "equipment_description": desc,
+        "tag": eid_str.map(tag_map),
+        "category": cat.where(cat.notna(), "(sin dato)"),
+        "date_prev": hits["_t_prev"],
+        "location_prev": hits["_loc_prev"],
+        "date": hits["_t"],
+        "location": hits["_loc"],
+        "gap_min": gap_min[hit_mask].round(1),
+        # `None` (no NaN) donde no aplica: los consumidores distinguen con `is None`
+        # (p. ej. el detalle de teletransporte en las alertas).
+        "distance_km": dist_r.astype(object).where(dist_r.notna(), None),
+        "speed_kmh": spd_r.astype(object).where(spd_r.notna(), None),
+        "reason": reason,
+        "severity": severity,
+        "source_id_prev": hits["_sid_prev"],
+        "source_id": hits["_sid"],
+    }, columns=EVENT_COLS)
     # Criticos primero, luego los mas recientes.
     out["_crit"] = (out["severity"] == "CRITICAL")
     out = out.sort_values(["_crit", "date"], ascending=[False, False])

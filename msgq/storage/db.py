@@ -360,6 +360,21 @@ class Database:
         row = self._read_one(f"SELECT COUNT(*) FROM {entity}")
         return int(row[0]) if row else 0
 
+    def row_counts(self, *entities: str) -> tuple[int, ...]:
+        """Conteos de varias tablas en UNA sola conexion/consulta. El refresco
+        visual los usa como 'gating' cada pocos segundos: abrir una conexion
+        efimera por tabla era costo puro en el hilo de la GUI."""
+        for e in entities:
+            if e not in _ENTITIES:
+                raise KeyError(f"Entidad desconocida: {e}")
+        if not entities:
+            return ()
+        sql = "SELECT " + ", ".join(f"(SELECT COUNT(*) FROM {e})" for e in entities)
+        row = self._read_one(sql)
+        if not row:
+            return tuple(0 for _ in entities)
+        return tuple(int(v or 0) for v in row)
+
     def purge_simulator_movements(self) -> int:
         """Borra movimientos del SIMULADOR (id 'SIM-%') que pudieran haber quedado
         en un replica de PRODUCCION (p. ej. tras correr el modo demo sobre el mismo

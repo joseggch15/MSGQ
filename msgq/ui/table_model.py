@@ -15,6 +15,17 @@ from msgq.ui import theme
 
 SORT_ROLE = Qt.UserRole + 1
 
+# QColor por cadena de color: el rol de fondo se consulta por CADA celda visible
+# en cada repintado; construir el QColor una sola vez por color evita ese costo.
+_COLOR_CACHE: dict[str, QColor] = {}
+
+
+def _cached_color(color: str) -> QColor:
+    qc = _COLOR_CACHE.get(color)
+    if qc is None:
+        qc = _COLOR_CACHE[color] = QColor(color)
+    return qc
+
 
 class DataFrameModel(QAbstractTableModel):
     """Expone un DataFrame de pandas como modelo de solo lectura para Qt."""
@@ -22,11 +33,17 @@ class DataFrameModel(QAbstractTableModel):
     def __init__(self, df: pd.DataFrame | None = None):
         super().__init__()
         self._df = df if df is not None else pd.DataFrame()
+        self._sev_col = self._severity_pos()
 
     def set_dataframe(self, df: pd.DataFrame):
         self.beginResetModel()
         self._df = df if df is not None else pd.DataFrame()
+        self._sev_col = self._severity_pos()
         self.endResetModel()
+
+    def _severity_pos(self) -> int | None:
+        cols = self._df.columns
+        return cols.get_loc("severity") if "severity" in cols else None
 
     def dataframe(self) -> pd.DataFrame:
         return self._df
@@ -53,10 +70,12 @@ class DataFrameModel(QAbstractTableModel):
             if role == Qt.TextAlignmentRole:
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     return int(Qt.AlignRight | Qt.AlignVCenter)
-            if role == Qt.BackgroundRole and "severity" in self._df.columns:
-                color = theme.severity_bg(self._df.iloc[index.row()].get("severity"))
+            if role == Qt.BackgroundRole and self._sev_col is not None:
+                # `iat` directo (no `.iloc[row]`): materializar una Series por
+                # celda pintada dominaba el repintado de la tabla de alertas.
+                color = theme.severity_bg(self._df.iat[index.row(), self._sev_col])
                 if color is not None:
-                    return QColor(color)
+                    return _cached_color(color)
         except Exception:  # noqa: BLE001
             return None
         return None

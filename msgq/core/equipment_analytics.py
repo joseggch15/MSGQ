@@ -137,7 +137,13 @@ def rfid_changes(changes: pd.DataFrame) -> pd.DataFrame:
     df = changes[mask].copy()
     if df.empty:
         return df
-    df["tipo"] = df.apply(_rfid_kind, axis=1)
+    # Clasificacion vectorizada (antes un apply fila a fila sobre todo el log):
+    # before y after -> Cambiado; solo after -> Asignado; solo before -> Removido.
+    has_before, has_after = df["before"].notna(), df["after"].notna()
+    tipo = pd.Series("Removido", index=df.index, dtype=object)
+    tipo[has_after] = "Asignado"
+    tipo[has_before & has_after] = "Cambiado"
+    df["tipo"] = tipo
     return df.sort_values("changed_at", ascending=False).reset_index(drop=True)
 
 
@@ -462,18 +468,6 @@ def _status_name(value) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return "(alta)"
     return config.EQUIPMENT_STATUS_BY_ID.get(str(value).strip(), f"id={value}")
-
-
-def _rfid_kind(row) -> str:
-    before = row.get("before")
-    after = row.get("after")
-    has_before = not _is_na(before)
-    has_after = not _is_na(after)
-    if has_before and has_after:
-        return "Cambiado"
-    if has_after:
-        return "Asignado"
-    return "Removido"
 
 
 def _is_na(v) -> bool:

@@ -21,7 +21,7 @@ import traceback
 from datetime import datetime
 
 import pandas as pd
-from PySide6.QtCore import QDate, Qt, QSettings, QThread, QTimer, Signal
+from PySide6.QtCore import QDate, QSettings, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDateEdit, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
